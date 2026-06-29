@@ -1,0 +1,11 @@
+evidence_id: E-006
+task_id: T-001
+acceptance_criteria:
+  - AC-6
+type: human_approval
+status: pass
+source: https://github.com/taskgraph-os/taskgraph-os/pull/1
+timestamp: 2026-06-29T12:05:00Z
+summary: >
+  Engineering Owner reviewed the example task folder and confirmed it contains
+  a contract, evidence records, validation commands, and completion gating.

@@ -1,0 +1,13 @@
+evidence_id: E-001
+task_id: T-001
+acceptance_criteria:
+  - AC-1
+type: integration_test
+status: pass
+commit_sha: a1b2c3d4e5f678901234567890abcdef12345678
+source: https://github.com/taskgraph-os/taskgraph-os/actions/runs/1001
+command: npm run validate:contracts
+timestamp: 2026-06-29T12:00:00Z
+summary: >
+  Contract validation exits non-zero for malformed task contracts and prints
+  schema issue paths for human review.

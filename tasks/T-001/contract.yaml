@@ -1,0 +1,87 @@
+id: T-001
+title: Task contract and evidence system
+
+goal: >
+  Prove that work can be governed by contracts and evidence before adding a broader swarm.
+  Establish the durable foundation — schemas, validation, state machine, Supabase tables,
+  and CI gates — that every subsequent task will build on.
+
+status: READY
+
+owner:
+  product: Product Owner
+  engineering: Engineering Owner
+
+scope:
+  in:
+    - Task contract YAML schema and Zod validator
+    - Evidence record YAML schema and Zod validator
+    - Contract validation CI script
+    - Evidence validation CI script
+    - Supabase Postgres migration (tasks, dependencies, contracts, evidence, runs, approvals)
+    - Task state machine with guarded transitions
+    - Example task folder demonstrating full lifecycle
+    - GitHub Action wiring validation into CI
+    - Pull request template enforcing evidence links
+  out:
+    - Cell LangGraph workflows (T-002 through T-004)
+    - Scheduler service
+    - Task graph UI
+    - Worker integrations (Claude Code, Codex)
+    - Autonomous deployment
+
+dependencies: []
+
+constraints:
+  - Additive migrations only
+  - No production secrets in repository
+  - Contract schema must be parseable without running application code
+  - CI must fail on invalid contracts or evidence before any merge
+
+acceptance_criteria:
+  - id: AC-1
+    requirement: Invalid contracts fail CI with a non-zero exit code and a human-readable error.
+    verification:
+      - Contract validation script integration test
+
+  - id: AC-2
+    requirement: A contract missing evidence mapping for any acceptance criterion fails CI.
+    verification:
+      - Evidence validation script integration test
+
+  - id: AC-3
+    requirement: Evidence cannot reference a criterion id that does not exist in the contract.
+    verification:
+      - Evidence cross-validation integration test
+
+  - id: AC-4
+    requirement: A task cannot transition to COMPLETE without all required evidence.
+    verification:
+      - State machine unit test
+
+  - id: AC-5
+    requirement: Every evidence record is tied to a named commit SHA or CI run URL.
+    verification:
+      - Evidence schema enforcement (Zod)
+
+  - id: AC-6
+    requirement: The example task demonstrates the full contract-to-evidence lifecycle.
+    verification:
+      - Manual review by Engineering Owner
+
+risks:
+  - risk: Schema drift between YAML files and Zod validators.
+    mitigation: Zod validators are the source of truth; YAML files are validated against them in CI on every push.
+
+  - risk: Supabase migration may fail if applied out of order.
+    mitigation: Migrations are numbered sequentially and applied via Supabase CLI in CI.
+
+rollback:
+  - Drop migration tables in reverse order (task_events, approval_records, decision_records,
+    verification_records, evidence_records, agent_runs, artifacts, context_packets,
+    task_contract_versions, task_dependencies, tasks, goals) if schema proves unfit.
+  - Schema is additive so rollback only needed before dependent tasks begin.
+
+approvals_required:
+  - Product
+  - Engineering

@@ -1,0 +1,36 @@
+{
+  "name": "taskgraph-os",
+  "version": "0.1.0",
+  "private": true,
+  "description": "State-centric control plane for agentic work",
+  "type": "module",
+  "scripts": {
+    "validate:contracts": "tsx scripts/validate-contract.ts",
+    "validate:evidence": "tsx scripts/validate-evidence.ts",
+    "validate": "npm run validate:contracts && npm run validate:evidence",
+    "test": "tsx --test tests/**/*.test.ts",
+    "healthcheck": "tsx scripts/healthcheck.ts",
+    "enqueue": "tsx scripts/enqueue-job.ts",
+    "smoke:seed": "tsx scripts/smoke-seed-planning.ts",
+    "smoke:seed:engineering": "tsx scripts/smoke-seed-engineering.ts",
+    "smoke:seed:verification": "tsx scripts/smoke-seed-verification.ts",
+    "smoke:inspect": "tsx scripts/smoke-inspect-task.ts",
+    "smoke:test:interrupt": "tsx scripts/smoke-test-interrupt.ts",
+    "scheduler": "tsx src/scheduler/index.ts",
+    "scheduler:once": "tsx src/scheduler/index.ts --once",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@langchain/langgraph": "^0.2.71",
+    "@supabase/supabase-js": "^2.49.4",
+    "dotenv": "^17.4.2",
+    "js-yaml": "^4.1.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
