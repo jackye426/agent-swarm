@@ -18,6 +18,7 @@
     "smoke:inspect": "tsx scripts/smoke-inspect-task.ts",
     "smoke:test:interrupt": "tsx scripts/smoke-test-interrupt.ts",
     "seed:t003": "tsx scripts/seed-t003.ts",
+    "intake": "tsx src/intake/index.ts",
     "scheduler": "tsx src/scheduler/index.ts",
     "scheduler:once": "tsx src/scheduler/index.ts --once",
     "typecheck": "tsc --noEmit"
@@ -27,10 +28,13 @@
     "@langchain/langgraph-checkpoint-postgres": "^0.0.5",
     "@supabase/supabase-js": "^2.49.4",
     "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "grammy": "^1.44.0",
     "js-yaml": "^4.1.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",
