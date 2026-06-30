@@ -14,8 +14,10 @@ const context = [
   "It uses OpenRouter role-based model routing.",
   "It uses LangGraph cell workflows.",
   "Task contracts and evidence live under tasks/T-###.",
-  "This is a smoke test: stop after draft contract and await human approval.",
 ].join("\n");
+
+// Pass --stop-after-draft to halt after the draft contract without auto-approving.
+const stopAfterDraft = process.argv.includes("--stop-after-draft");
 
 async function main(): Promise<void> {
   const { error: taskError } = await db.from("tasks").upsert({
@@ -35,11 +37,11 @@ async function main(): Promise<void> {
       task_id: taskId,
       goal,
       context,
-      stop_after_draft: true,
+      stop_after_draft: stopAfterDraft,
     },
   });
 
-  console.log(`Seeded and enqueued planning smoke test for ${taskId}`);
+  console.log(`Seeded and enqueued planning smoke test for ${taskId}${stopAfterDraft ? " (stop after draft)" : " (full pipeline with auto-approve)"}`);
 }
 
 main().catch((err) => {

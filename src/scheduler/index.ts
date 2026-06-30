@@ -25,7 +25,7 @@ import {
 } from "../db/records.js";
 import { getTaskStatus, transitionTaskStatus } from "../db/tasks.js";
 import { canTransition } from "../core/state-machine.js";
-import { planningWorkflow } from "../cells/planning/workflow.js";
+import { getPlanningWorkflow } from "../cells/planning/workflow.js";
 import { engineeringWorkflow } from "../cells/engineering/workflow.js";
 import { verificationWorkflow } from "../cells/verification/workflow.js";
 
@@ -78,13 +78,22 @@ async function processJob(queueName: QueueJobType, payload: Record<string, unkno
     case "task.plan.requested": {
       const parsed = PlanRequestedPayloadSchema.parse(payload);
       await transitionIfLegal(parsed.task_id, "PLANNING");
-      const planResult = await planningWorkflow.invoke({
-        taskId: parsed.task_id,
-        agentRunId,
-        goal: parsed.goal,
-        context: parsed.context,
-        stopAfterDraft: parsed.stop_after_draft,
-      });
+
+      const planningWorkflow = await getPlanningWorkflow();
+      // thread_id = agentRunId ties this invoke to a durable checkpoint slot.
+      // If the process crashes mid-run, re-invoking with the same thread_id
+      // resumes from the last completed node rather than restarting from scratch.
+      const planResult = await planningWorkflow.invoke(
+        {
+          taskId: parsed.task_id,
+          agentRunId,
+          goal: parsed.goal,
+          context: parsed.context,
+          stopAfterDraft: parsed.stop_after_draft,
+        },
+        { configurable: { thread_id: agentRunId } },
+      );
+
       if (planResult.error) throw new Error(`Planning workflow error: ${planResult.error}`);
       break;
     }

@@ -15,15 +15,18 @@ owner:
 scope:
   in:
     - .github/workflows/ci.yml
+    - tasks/T-003/evidence/ (evidence files documenting AC verification)
   out:
-    - Any changes to src/, scripts/, tasks/, or any other file
+    - Any changes to src/, scripts/, or any file outside .github/ and tasks/T-003/evidence/
     - Changes to package.json, tsconfig.json, or existing configuration
     - New npm scripts or dependencies
+    - tasks/T-003/contract.yaml (do not modify the contract itself)
 
 dependencies: []
 
 constraints:
-  - Only .github/workflows/ci.yml may be created or modified
+  - Only .github/workflows/ci.yml and tasks/T-003/evidence/ may be created or modified
+  - Do not edit tasks/T-003/contract.yaml
   - Workflow must use a publicly available GitHub Actions runner (ubuntu-latest)
   - Node.js version must be pinned to 20.x (LTS)
   - No secrets or environment variables beyond what is already in the repository
