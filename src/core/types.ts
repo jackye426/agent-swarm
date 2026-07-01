@@ -113,6 +113,10 @@ export interface Task {
   status: TaskStatus;
   cell: CellType;
   contract_version: number;
+  repo_url: string | null;
+  repo_full_name: string | null;
+  source: string | null;
+  source_context: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 }

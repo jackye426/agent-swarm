@@ -1,6 +1,6 @@
 # Feature Implementation Plan: LangGraph Postgres Checkpointer
 
-**Overall Progress:** `80%`
+**Overall Progress:** `90%`
 
 ## TLDR
 Wire the `@langchain/langgraph-checkpoint-postgres` checkpointer into the planning cell for crash recovery on long runs. Replace the blocking `humanApprovalGate` (interrupt) with an autonomous `autoApproveContract` node that records a notification artifact and self-approves. The `reviseContract` loop is removed — no human feedback means nothing to iterate on. Add `paused` to the `agent_run_status` enum for future Telegram escalation.
@@ -35,8 +35,8 @@ Wire the `@langchain/langgraph-checkpoint-postgres` checkpointer into the planni
   - [x] 🟩 Pass `{ configurable: { thread_id: agentRunId } }` to `planningWorkflow.invoke()`
   - [x] 🟩 Interrupt branch removed — `autoApproveContract` never interrupts; future escalation path wires here
 
-- [ ] 🟥 **Step 5: Smoke test**
-  - [ ] 🟥 Reset T-002 to DRAFT, re-seed planning job (`npm run smoke:seed -- T-002`)
-  - [ ] 🟥 Run `npm run scheduler:once` — expect T-002 → READY (not AWAITING_APPROVAL)
-  - [ ] 🟥 Inspect artifacts: `human_notification` artifact exists, `approved_contract` artifact exists
-  - [ ] 🟥 Update STATUS.md and memory
+- [ ] 🟨 **Step 5: Smoke test** _(blocked: needs DATABASE_URL password)_
+  - [ ] 🟥 Add DB password to `DATABASE_URL` in `.env` (Supabase → Settings → Database → Reset password)
+  - [ ] 🟥 `npm run smoke:seed -- T-002` → `npm run scheduler:once`
+  - [ ] 🟥 Expect T-002 → READY; `human_notification` + `approved_contract` artifacts written
+  - [x] 🟩 STATUS.md + memory updated

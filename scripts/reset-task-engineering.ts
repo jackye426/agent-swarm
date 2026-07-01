@@ -15,6 +15,15 @@ import type { QueueJobType } from "../src/core/types.js";
 
 const taskId = process.argv[2] ?? "T-002";
 
+/** Optional test commands after task id, semicolon-separated: `T-006 "npm test;npm run test:negative"` */
+function parseTestCommands(): string[] {
+  const raw = process.argv[3];
+  if (!raw) return [];
+  return raw.split(";").map((c) => c.trim()).filter(Boolean);
+}
+
+const extraTestCommands = parseTestCommands();
+
 const QUEUES_TO_DRAIN: QueueJobType[] = [
   "task.plan.requested",
   "task.execution.requested",
@@ -86,7 +95,10 @@ async function main(): Promise<void> {
   await enqueue({
     job_type: "task.execution.requested",
     task_id: taskId,
-    payload: { task_id: taskId },
+    payload: {
+      task_id: taskId,
+      ...(extraTestCommands.length > 0 ? { test_commands: extraTestCommands } : {}),
+    },
   });
 
   console.log(`\n✓ ${taskId} reset to READY and re-enqueued for engineering.`);

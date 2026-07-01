@@ -7,6 +7,11 @@ import type {
   TaskContract,
   TaskVerdict,
 } from "../core/types.js";
+import {
+  buildExecutionReadyPacket,
+  type ExecutabilityResult,
+} from "../core/contract-executability.js";
+import type { SeedRepoContext } from "../intake/repo-scanner.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -160,6 +165,27 @@ export async function createContextPacket(taskId: string, content: JsonObject): 
   return (data as { id: string }).id;
 }
 
+export async function enrichExecutionContextPacket(
+  taskId: string,
+  contract: TaskContract,
+  packet: JsonObject,
+  executability: ExecutabilityResult,
+): Promise<string> {
+  const seed = (packet.seed ?? null) as SeedRepoContext | null;
+  const content = buildExecutionReadyPacket({
+    repoFullName:
+      (typeof packet.repo_full_name === "string" ? packet.repo_full_name : null) ??
+      seed?.repo_full_name ??
+      "",
+    userContext: typeof packet.user_context === "string" ? packet.user_context : "",
+    planningContext: typeof packet.planning_context === "string" ? packet.planning_context : "",
+    seed,
+    contract,
+    executability,
+  });
+  return createContextPacket(taskId, content);
+}
+
 export async function getLatestContextPacket(taskId: string): Promise<JsonObject | null> {
   const { data, error } = await db
     .from("context_packets")
@@ -272,8 +298,70 @@ export async function requiredApprovalsRecorded(taskId: string, requiredRoles: s
   return requiredRoles.every((role) => approvedRoles.has(role));
 }
 
+export async function getReworkAttemptCount(taskId: string): Promise<number> {
+  const { count, error } = await db
+    .from("agent_runs")
+    .select("*", { count: "exact", head: true })
+    .eq("task_id", taskId)
+    .eq("worker_type", "rework-cell");
+
+  assertNoError(error, `Failed to count rework attempts for ${taskId}`);
+  return count ?? 0;
+}
+
 export async function dependenciesComplete(taskId: string): Promise<boolean> {
   const { data, error } = await db.rpc("task_dependencies_complete", { p_task_id: taskId });
   assertNoError(error, `Failed to check dependencies for ${taskId}`);
   return Boolean(data);
+}
+
+export async function getChatRepoBinding(chatId: string): Promise<string | null> {
+  const { data, error } = await db
+    .from("chat_repo_bindings")
+    .select("repo_full_name")
+    .eq("chat_id", chatId)
+    .maybeSingle();
+
+  assertNoError(error, `Failed to load chat repo binding for ${chatId}`);
+  return (data as { repo_full_name: string } | null)?.repo_full_name ?? null;
+}
+
+export async function setChatRepoBinding(chatId: string, repoFullName: string): Promise<void> {
+  const { error } = await db.from("chat_repo_bindings").upsert({
+    chat_id: chatId,
+    repo_full_name: repoFullName,
+    updated_at: new Date().toISOString(),
+  });
+
+  assertNoError(error, `Failed to set chat repo binding for ${chatId}`);
+}
+
+export interface TaskRepoInfo {
+  repoUrl: string | null;
+  repoFullName: string | null;
+  source: string | null;
+  sourceContext: JsonObject | null;
+}
+
+export async function getTaskRepo(taskId: string): Promise<TaskRepoInfo> {
+  const { data, error } = await db
+    .from("tasks")
+    .select("repo_url, repo_full_name, source, source_context")
+    .eq("id", taskId)
+    .single();
+
+  assertNoError(error, `Failed to load repo info for ${taskId}`);
+  const row = data as {
+    repo_url: string | null;
+    repo_full_name: string | null;
+    source: string | null;
+    source_context: JsonObject | null;
+  };
+
+  return {
+    repoUrl: row.repo_url,
+    repoFullName: row.repo_full_name,
+    source: row.source,
+    sourceContext: row.source_context,
+  };
 }

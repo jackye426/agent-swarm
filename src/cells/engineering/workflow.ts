@@ -1,13 +1,26 @@
 import { StateGraph, Annotation } from "@langchain/langgraph";
 import path from "node:path";
 import os from "node:os";
-import { writeFile, mkdir } from "node:fs/promises";
-import yaml from "js-yaml";
+import { writeFile, mkdir, access, readFile } from "node:fs/promises";
 import type { TaskContract, EvidenceRecord } from "../../core/types.js";
 import { runCommand, runShellCommand, type CommandResult } from "../../core/command.js";
+import {
+  classifyAcceptanceCriterion,
+  extractCommandFromVerification,
+  primaryAcKind,
+} from "../../core/contract-executability.js";
 import { invokeRoleModel } from "../../core/model-router.js";
-import { recordArtifact, recordEvidence } from "../../db/records.js";
+import { getTaskRepo, recordArtifact, recordEvidence } from "../../db/records.js";
+import { parseGitHubRemoteUrl } from "../../core/repo.js";
 import { transitionTaskStatus } from "../../db/tasks.js";
+import {
+  hasStagedChanges,
+  lastCommitHasExcludedPaths,
+  removeExcludedFilesFromDisk,
+  stageAllExceptExcluded,
+  undoLastCommitKeepingChanges,
+} from "./commit-staging.js";
+import { writeWorktreeSupportFiles } from "./worktree-support.js";
 
 const EngineeringState = Annotation.Root({
   taskId: Annotation<string>(),
@@ -16,8 +29,10 @@ const EngineeringState = Annotation.Root({
   contract: Annotation<TaskContract>(),
   contextPacket: Annotation<string>(),
   testCommands: Annotation<string[]>({ default: () => [], reducer: (_, v) => v }),
+  repoRoot: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
   worktreePath: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
   branchName: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
+  repoHasHead: Annotation<boolean>({ default: () => true, reducer: (_, v) => v }),
   commitSha: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
   implementationPlan: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
   implementationReport: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
@@ -30,6 +45,78 @@ const EngineeringState = Annotation.Root({
 });
 
 type S = typeof EngineeringState.State;
+
+async function resolveRepoRoot(state: S): Promise<Partial<S>> {
+  const taskRepo = await getTaskRepo(state.taskId);
+  const storageRoot = process.env.TASKGRAPH_WORKTREE_ROOT ?? path.join(os.tmpdir(), "taskgraph-os");
+
+  if (!taskRepo.repoFullName) {
+    // No external repo — work inside the current process's checkout.
+    return { repoRoot: process.cwd() };
+  }
+
+  // Check if the task's repo matches the local CWD repo.
+  const localRemote = await runCommand("git", ["remote", "get-url", "origin"]);
+  const localFullName = localRemote.exitCode === 0
+    ? parseGitHubRemoteUrl(localRemote.stdout.trim())
+    : null;
+
+  if (localFullName === taskRepo.repoFullName) {
+    return { repoRoot: process.cwd() };
+  }
+
+  // External repo — clone into the worktree storage area if not already present.
+  const [owner, name] = taskRepo.repoFullName.split("/");
+  const cloneDir = path.join(storageRoot, "repos", owner!, name!);
+
+  let cloneDirExists = false;
+  try {
+    await access(path.join(cloneDir, ".git"));
+    cloneDirExists = true;
+  } catch { /* not cloned yet */ }
+
+  if (cloneDirExists) {
+    const fetch = await runCommand("git", ["fetch", "--depth", "50", "origin"], { cwd: cloneDir, timeoutMs: 120_000 });
+    if (fetch.exitCode !== 0) {
+      const hasHead = await runCommand("git", ["rev-parse", "--verify", "HEAD"], { cwd: cloneDir });
+      if (hasHead.exitCode !== 0) {
+        // Empty repositories have no HEAD to fetch/reset yet. Use the clone as
+        // the initial worktree and let createWorktree create an orphan branch.
+        return { repoRoot: cloneDir, repoHasHead: false };
+      }
+      if ((fetch.stderr || fetch.stdout).includes("couldn't find remote ref HEAD")) {
+        // Remote is still empty, but the local clone may have an in-progress
+        // task branch from an earlier attempt. Continue from local state.
+        return { repoRoot: cloneDir, repoHasHead: true };
+      }
+      return { error: `Failed to fetch ${taskRepo.repoFullName}: ${fetch.stderr || fetch.stdout}` };
+    }
+
+    await runCommand("git", ["remote", "set-head", "origin", "-a"], { cwd: cloneDir, timeoutMs: 120_000 });
+    const reset = await runCommand("git", ["reset", "--hard", "origin/HEAD"], { cwd: cloneDir, timeoutMs: 120_000 });
+    if (reset.exitCode !== 0) {
+      const hasHead = await runCommand("git", ["rev-parse", "--verify", "HEAD"], { cwd: cloneDir });
+      if (hasHead.exitCode !== 0) {
+        return { repoRoot: cloneDir, repoHasHead: false };
+      }
+      return { error: `Failed to refresh ${taskRepo.repoFullName} to origin/HEAD: ${reset.stderr || reset.stdout}` };
+    }
+  } else {
+    const token = process.env.GITHUB_TOKEN?.trim();
+    const cloneUrl = token
+      ? `https://x-access-token:${token}@github.com/${taskRepo.repoFullName}.git`
+      : `https://github.com/${taskRepo.repoFullName}.git`;
+
+    await mkdir(path.dirname(cloneDir), { recursive: true });
+    const clone = await runCommand("git", ["clone", "--depth", "50", cloneUrl, cloneDir], { timeoutMs: 300_000 });
+    if (clone.exitCode !== 0) {
+      return { error: `Failed to clone ${taskRepo.repoFullName}: ${clone.stderr || clone.stdout}` };
+    }
+  }
+
+  const head = await runCommand("git", ["rev-parse", "--verify", "HEAD"], { cwd: cloneDir });
+  return { repoRoot: cloneDir, repoHasHead: head.exitCode === 0 };
+}
 
 async function compileContextPacket(state: S): Promise<Partial<S>> {
   await recordArtifact({
@@ -45,35 +132,66 @@ async function compileContextPacket(state: S): Promise<Partial<S>> {
 }
 
 async function createWorktree(state: S): Promise<Partial<S>> {
-  const root = process.env.TASKGRAPH_WORKTREE_ROOT ?? path.join(os.tmpdir(), "taskgraph-os");
+  if (!state.repoRoot) return { error: "Cannot create worktree: repo root not resolved" };
+
+  const storageRoot = process.env.TASKGRAPH_WORKTREE_ROOT ?? path.join(os.tmpdir(), "taskgraph-os");
   const branchName = `taskgraph/${state.taskId.toLowerCase()}`;
-  const worktreePath = path.join(root, state.taskId);
+
+  const currentBranch = await runCommand("git", ["branch", "--show-current"], { cwd: state.repoRoot });
+  if (currentBranch.stdout.trim() === branchName) {
+    await writeWorktreeSupportFiles(state.repoRoot, state.taskId, state.contract);
+    await recordArtifact({
+      taskId: state.taskId,
+      artifactType: "engineering_worktree",
+      content: {
+        agent_run_id: state.agentRunId,
+        path: state.repoRoot,
+        branch: branchName,
+        mode: "reuse_repo_root_task_branch",
+      },
+    });
+    return { worktreePath: state.repoRoot, branchName };
+  }
+
+  if (!state.repoHasHead) {
+    const checkout = await runCommand("git", ["checkout", "--orphan", branchName], { cwd: state.repoRoot });
+    if (checkout.exitCode !== 0 && !checkout.stderr.includes("already exists")) {
+      return { error: `Failed to create orphan branch for empty repo: ${checkout.stderr || checkout.stdout}` };
+    }
+    await writeWorktreeSupportFiles(state.repoRoot, state.taskId, state.contract);
+    await recordArtifact({
+      taskId: state.taskId,
+      artifactType: "engineering_worktree",
+      content: {
+        agent_run_id: state.agentRunId,
+        path: state.repoRoot,
+        branch: branchName,
+        mode: "empty_repo_orphan_branch",
+      },
+    });
+    return { worktreePath: state.repoRoot, branchName };
+  }
+
+  const worktreePath = path.join(storageRoot, state.taskId);
   // git outputs forward-slash paths on all platforms; normalize for comparison
   const worktreePathUnix = worktreePath.replace(/\\/g, "/");
 
-  await runCommand("git", ["worktree", "prune"]);
-  const existing = await runCommand("git", ["worktree", "list", "--porcelain"]);
+  await runCommand("git", ["worktree", "prune"], { cwd: state.repoRoot });
+  const existing = await runCommand("git", ["worktree", "list", "--porcelain"], { cwd: state.repoRoot });
   const worktreeExists = existing.stdout.includes(worktreePathUnix) || existing.stdout.includes(worktreePath);
 
   if (!worktreeExists) {
-    const result = await runCommand("git", ["worktree", "add", "-B", branchName, worktreePath, "HEAD"]);
+    const result = await runCommand("git", ["worktree", "add", "-B", branchName, worktreePath, "HEAD"], { cwd: state.repoRoot });
     if (result.exitCode !== 0) {
       // Branch may already be checked out in the worktree — try without -B
-      const retry = await runCommand("git", ["worktree", "add", worktreePath, branchName]);
+      const retry = await runCommand("git", ["worktree", "add", worktreePath, branchName], { cwd: state.repoRoot });
       if (retry.exitCode !== 0) {
         return { error: `Failed to create git worktree: ${result.stderr || result.stdout}` };
       }
     }
   }
 
-  // Write the contract as YAML so validate-contract.ts can find it when running npm run validate.
-  const contractDir = path.join(worktreePath, "tasks", state.taskId);
-  await mkdir(contractDir, { recursive: true });
-  await writeFile(
-    path.join(contractDir, "contract.yaml"),
-    yaml.dump(state.contract, { lineWidth: 120 }),
-    "utf8"
-  );
+  await writeWorktreeSupportFiles(worktreePath, state.taskId, state.contract);
 
   await recordArtifact({
     taskId: state.taskId,
@@ -85,6 +203,48 @@ async function createWorktree(state: S): Promise<Partial<S>> {
 
 async function installDependencies(state: S): Promise<Partial<S>> {
   if (!state.worktreePath) return { error: "Cannot install dependencies without a worktree path" };
+
+  const packageJsonPath = path.join(state.worktreePath, "package.json");
+  try {
+    await access(packageJsonPath);
+  } catch {
+    await recordArtifact({
+      taskId: state.taskId,
+      artifactType: "dependency_install_skipped",
+      content: {
+        agent_run_id: state.agentRunId,
+        reason: "No package.json exists before implementation; worker may be bootstrapping the repo.",
+      },
+    });
+    return {};
+  }
+
+  try {
+    const pkg = JSON.parse(await readFile(packageJsonPath, "utf8")) as {
+      dependencies?: Record<string, unknown>;
+      devDependencies?: Record<string, unknown>;
+    };
+    const hasDependencies =
+      Object.keys(pkg.dependencies ?? {}).length > 0 ||
+      Object.keys(pkg.devDependencies ?? {}).length > 0;
+    const hasLockfile = await access(path.join(state.worktreePath, "package-lock.json"))
+      .then(() => true)
+      .catch(() => false);
+
+    if (!hasDependencies && !hasLockfile) {
+      await recordArtifact({
+        taskId: state.taskId,
+        artifactType: "dependency_install_skipped",
+        content: {
+          agent_run_id: state.agentRunId,
+          reason: "package.json has no dependencies and no lockfile; npm install would only create package-lock.json.",
+        },
+      });
+      return {};
+    }
+  } catch {
+    // Fall through to npm so invalid package.json surfaces as a normal install/test failure.
+  }
 
   const ciResult = await runShellCommand("npm ci --prefer-offline", {
     cwd: state.worktreePath,
@@ -114,7 +274,8 @@ async function planImplementation(state: S): Promise<Partial<S>> {
     {
       role: "system",
       content: `You are a senior software engineer. Produce a precise implementation plan.
-Map each acceptance criterion to code changes, tests, and evidence. Do not expand scope silently.`,
+Map each acceptance criterion to code changes, tests, and evidence. Do not expand scope silently.
+If work requires touching scope-out areas, declare the expansion explicitly.`,
     },
     {
       role: "user",
@@ -124,6 +285,9 @@ Goal: ${state.contract.goal}
 
 Scope in:
 ${state.contract.scope.in.map((s) => `  - ${s}`).join("\n")}
+
+Scope out (do not modify without declaring expansion):
+${state.contract.scope.out.length > 0 ? state.contract.scope.out.map((s) => `  - ${s}`).join("\n") : "  (none listed)"}
 
 Constraints:
 ${state.contract.constraints.map((c) => `  - ${c}`).join("\n")}
@@ -164,7 +328,10 @@ async function invokeClaudeCode(state: S): Promise<Partial<S>> {
     const authorizedPrompt = [
       `AUTHORIZATION: This task (${state.taskId}) is approved and IN_PROGRESS.`,
       `All human approvals have been recorded. Proceed directly with implementation.`,
-      `Do not stop to ask for approval — implement all changes described below now.\n`,
+      `Do not stop to ask for approval — implement all changes described below now.`,
+      `Do not modify tasks/${state.taskId}/contract.yaml.`,
+      `Do not create or commit .taskgraph* files.`,
+      `Do not run git commit — the engineering cell commits your changes.\n`,
       state.implementationPlan,
     ].join("\n");
 
@@ -202,15 +369,51 @@ async function invokeClaudeCode(state: S): Promise<Partial<S>> {
   return { implementationReport };
 }
 
+async function resolveTestCommands(worktreePath: string, requested: string[]): Promise<string[]> {
+  const defaults = (process.env.TASKGRAPH_DEFAULT_TEST_COMMANDS ?? "npm run typecheck,npm test")
+    .split(",")
+    .map((command) => command.trim())
+    .filter(Boolean);
+  const commands = requested.length > 0 ? requested : defaults;
+
+  let scripts: Record<string, string> = {};
+  try {
+    const pkgPath = path.join(worktreePath, "package.json");
+    const raw = await readFile(pkgPath, "utf8");
+    scripts = (JSON.parse(raw) as { scripts?: Record<string, string> }).scripts ?? {};
+  } catch {
+    return commands;
+  }
+
+  const available: string[] = [];
+  const skipped: string[] = [];
+  for (const command of commands) {
+    const match = command.match(/^npm run (\S+)$/);
+    if (match && !scripts[match[1]!]) {
+      skipped.push(command);
+      continue;
+    }
+    available.push(command);
+  }
+
+  if (skipped.length > 0) {
+    console.log(`[Engineering Cell] Skipping unavailable test commands: ${skipped.join(", ")}`);
+  }
+  if (available.length === 0) {
+    throw new Error(`No runnable test commands after filtering. Requested: ${commands.join(", ")}`);
+  }
+  return available;
+}
+
 async function runTests(state: S): Promise<Partial<S>> {
   if (!state.worktreePath) return { error: "Cannot run tests without a worktree path" };
 
-  const commands = state.testCommands.length > 0
-    ? state.testCommands
-    : (process.env.TASKGRAPH_DEFAULT_TEST_COMMANDS ?? "npm run typecheck,npm test")
-      .split(",")
-      .map((command) => command.trim())
-      .filter(Boolean);
+  let commands: string[];
+  try {
+    commands = await resolveTestCommands(state.worktreePath, state.testCommands);
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
 
   const results: CommandResult[] = [];
   for (const command of commands) {
@@ -245,26 +448,117 @@ async function runTests(state: S): Promise<Partial<S>> {
   return { ciOutput, testResults: results, commitSha };
 }
 
+function fileMatchesScopeOutItem(filePath: string, scopeOutItem: string): boolean {
+  const file = filePath.toLowerCase().replace(/\\/g, "/");
+  const item = scopeOutItem.toLowerCase();
+  if (!item.includes("/") && !item.includes("*") && !item.includes(".")) {
+    return false;
+  }
+  const prefix = item.replace(/\*\*/g, "").replace(/\*/g, "").replace(/\/$/, "").trim();
+  if (!prefix) return false;
+  return file.startsWith(prefix) || file.includes(`/${prefix}`) || file.includes(prefix);
+}
+
+async function listChangedFiles(worktreePath: string): Promise<string[]> {
+  const againstParent = await runCommand("git", ["diff", "--name-only", "HEAD~1", "HEAD"], {
+    cwd: worktreePath,
+  });
+  if (againstParent.exitCode === 0 && againstParent.stdout.trim()) {
+    return againstParent.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  }
+
+  const allTracked = await runCommand("git", ["ls-files"], { cwd: worktreePath });
+  if (allTracked.exitCode === 0 && allTracked.stdout.trim()) {
+    return allTracked.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+async function detectScopeExpansion(
+  worktreePath: string,
+  scopeOut: string[],
+): Promise<{ expanded: boolean; matches: string[] }> {
+  if (scopeOut.length === 0) return { expanded: false, matches: [] };
+
+  const changedFiles = await listChangedFiles(worktreePath);
+  const matches: string[] = [];
+  for (const file of changedFiles) {
+    for (const item of scopeOut) {
+      if (fileMatchesScopeOutItem(file, item)) {
+        matches.push(`${file} (matched scope.out: ${item})`);
+      }
+    }
+  }
+  return { expanded: matches.length > 0, matches };
+}
+
+async function applyScopeCheckResult(
+  state: S,
+  commitSha: string | null,
+): Promise<Partial<S>> {
+  if (!state.worktreePath) return { commitSha };
+
+  const scopeCheck = await detectScopeExpansion(state.worktreePath, state.contract.scope.out);
+  if (scopeCheck.expanded) {
+    await recordArtifact({
+      taskId: state.taskId,
+      artifactType: "scope_expansion_warning",
+      content: {
+        agent_run_id: state.agentRunId,
+        matches: scopeCheck.matches,
+        scope_out: state.contract.scope.out,
+      },
+    });
+    return { commitSha, scopeExpansionDeclared: false };
+  }
+
+  return { commitSha };
+}
+
 async function commitChanges(state: S): Promise<Partial<S>> {
   if (!state.worktreePath) return { error: "Cannot commit without a worktree path" };
 
-  await runCommand("git", ["add", "-A"], { cwd: state.worktreePath });
+  const { worktreePath, taskId } = state;
+  await removeExcludedFilesFromDisk(worktreePath, taskId);
 
-  const status = await runCommand("git", ["status", "--porcelain"], { cwd: state.worktreePath });
+  const status = await runCommand("git", ["status", "--porcelain"], { cwd: worktreePath });
   if (status.stdout.trim() === "") {
-    // Claude Code already committed — capture whatever HEAD is now
-    const sha = await runCommand("git", ["rev-parse", "HEAD"], { cwd: state.worktreePath });
-    return { commitSha: sha.exitCode === 0 ? sha.stdout.trim() : state.commitSha };
+    if (await lastCommitHasExcludedPaths(worktreePath, taskId)) {
+      await undoLastCommitKeepingChanges(worktreePath);
+    } else {
+      const sha = await runCommand("git", ["rev-parse", "HEAD"], { cwd: worktreePath });
+      const commitSha = sha.exitCode === 0 ? sha.stdout.trim() : state.commitSha ?? null;
+      return applyScopeCheckResult(state, commitSha);
+    }
   }
 
-  const message = `feat(${state.taskId}): implement via engineering cell\n\nAgent run: ${state.agentRunId}`;
-  const commit = await runCommand("git", ["commit", "-m", message], { cwd: state.worktreePath });
+  await stageAllExceptExcluded(worktreePath, taskId);
+
+  if (!(await hasStagedChanges(worktreePath))) {
+    const sha = await runCommand("git", ["rev-parse", "HEAD"], { cwd: worktreePath });
+    const commitSha = sha.exitCode === 0 ? sha.stdout.trim() : state.commitSha ?? null;
+    return applyScopeCheckResult(state, commitSha);
+  }
+
+  const message = `feat(${taskId}): implement via engineering cell\n\nAgent run: ${state.agentRunId}`;
+  const commitAuthorName = process.env.TASKGRAPH_GIT_AUTHOR_NAME ?? "TaskGraph OS";
+  const commitAuthorEmail = process.env.TASKGRAPH_GIT_AUTHOR_EMAIL ?? "taskgraph@example.local";
+  const commit = await runCommand("git", [
+    "-c",
+    `user.name=${commitAuthorName}`,
+    "-c",
+    `user.email=${commitAuthorEmail}`,
+    "commit",
+    "-m",
+    message,
+  ], { cwd: worktreePath });
   if (commit.exitCode !== 0) {
     return { error: `git commit failed: ${commit.stderr || commit.stdout}` };
   }
 
-  const sha = await runCommand("git", ["rev-parse", "HEAD"], { cwd: state.worktreePath });
-  return { commitSha: sha.exitCode === 0 ? sha.stdout.trim() : null };
+  const sha = await runCommand("git", ["rev-parse", "HEAD"], { cwd: worktreePath });
+  const commitSha = sha.exitCode === 0 ? sha.stdout.trim() : null;
+  return applyScopeCheckResult(state, commitSha);
 }
 
 async function createPullRequest(state: S): Promise<Partial<S>> {
@@ -316,20 +610,64 @@ async function assembleEvidence(state: S): Promise<Partial<S>> {
   const source = state.prUrl ?? process.env.TASKGRAPH_EVIDENCE_SOURCE_URL ?? `https://localhost/taskgraph-os/${state.taskId}`;
   const taskNumber = state.taskId.replace("T-", "");
 
-  const evidence: EvidenceRecord[] = state.contract.acceptance_criteria.map((ac, i) => ({
-    evidence_id: `E-${taskNumber}${String(i + 1).padStart(3, "0")}`,
-    task_id: state.taskId,
-    acceptance_criteria: [ac.id],
-    type: "ci_run",
-    status: testsPassed ? "pass" : "fail",
-    commit_sha: state.commitSha ?? undefined,
-    source,
-    command: state.testResults.map((result) => result.command).join(" && "),
-    timestamp,
-    summary: testsPassed
-      ? `Engineering test commands passed for ${ac.id}; independent verification still required.`
-      : `Engineering test commands failed or did not complete for ${ac.id}; verification should require rework.`,
-  }));
+  const evidence: EvidenceRecord[] = [];
+  let evidenceIndex = 0;
+
+  for (const ac of state.contract.acceptance_criteria) {
+    const kinds = classifyAcceptanceCriterion(ac);
+    const primary = primaryAcKind(kinds);
+
+    if (primary === "human" || primary === "unknown") {
+      continue;
+    }
+
+    evidenceIndex += 1;
+    const evidenceId = `E-${taskNumber}${String(evidenceIndex).padStart(3, "0")}`;
+
+    if (primary === "diff_inspection") {
+      evidence.push({
+        evidence_id: evidenceId,
+        task_id: state.taskId,
+        acceptance_criteria: [ac.id],
+        type: "model_review",
+        status: "inconclusive",
+        commit_sha: state.commitSha ?? undefined,
+        source,
+        timestamp,
+        summary: `${ac.id}: awaiting verification via PR diff inspection (${ac.verification.join(", ")})`,
+      });
+      continue;
+    }
+
+    const acCommands = ac.verification
+      .map(extractCommandFromVerification)
+      .filter((c): c is string => c !== null);
+    const relevantResults =
+      acCommands.length > 0
+        ? state.testResults.filter((result) =>
+            acCommands.some((cmd) => result.command.includes(cmd.replace("npm run ", ""))),
+          )
+        : state.testResults;
+    const acTestsPassed =
+      relevantResults.length > 0 && relevantResults.every((result) => result.exitCode === 0);
+
+    evidence.push({
+      evidence_id: evidenceId,
+      task_id: state.taskId,
+      acceptance_criteria: [ac.id],
+      type: "ci_run",
+      status: acTestsPassed ? "pass" : testsPassed ? "pass" : "fail",
+      commit_sha: state.commitSha ?? undefined,
+      source,
+      command: (relevantResults.length > 0 ? relevantResults : state.testResults)
+        .map((result) => result.command)
+        .join(" && "),
+      timestamp,
+      summary: acTestsPassed
+        ? `Engineering test commands passed for ${ac.id}; independent verification still required.`
+        : `Engineering test commands failed or did not complete for ${ac.id}; verification should require rework.`,
+    });
+  }
 
   for (const item of evidence) {
     await recordEvidence({ ...item, agentRunId: state.agentRunId });
@@ -374,6 +712,7 @@ async function handleError(state: S): Promise<Partial<S>> {
 }
 
 const graph = new StateGraph(EngineeringState)
+  .addNode("resolveRepoRoot", resolveRepoRoot)
   .addNode("compileContextPacket", compileContextPacket)
   .addNode("createWorktree", createWorktree)
   .addNode("installDependencies", installDependencies)
@@ -384,7 +723,11 @@ const graph = new StateGraph(EngineeringState)
   .addNode("createPullRequest", createPullRequest)
   .addNode("assembleEvidence", assembleEvidence)
   .addNode("handleError", handleError)
-  .addEdge("__start__", "compileContextPacket")
+  .addEdge("__start__", "resolveRepoRoot")
+  .addConditionalEdges("resolveRepoRoot", hasError, {
+    error: "handleError",
+    continue: "compileContextPacket",
+  })
   .addEdge("compileContextPacket", "createWorktree")
   .addConditionalEdges("createWorktree", hasError, {
     error: "handleError",

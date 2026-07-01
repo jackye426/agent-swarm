@@ -3,3 +3,4 @@ dist/
 .env
 *.env.local
 .taskgraph_impl_plan.txt
+.taskgraph-seed-scan.json

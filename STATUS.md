@@ -1,6 +1,6 @@
-# TaskGraph OS — Project Status
+# TaskGraph OS - Project Status
 
-_Last updated: 2026-06-30 (session 2)_
+_Last updated: 2026-07-01 (session 5 — commit discipline fix)_
 
 ---
 
@@ -9,98 +9,124 @@ _Last updated: 2026-06-30 (session 2)_
 | Layer | Status |
 |-------|--------|
 | Core types, schemas, state machine | Complete |
-| Supabase migrations (001, 002) | Complete |
+| Supabase migrations 001-004 | Complete (run in Supabase) |
 | Queue RPC wrappers | Complete |
 | Model router (OpenRouter) | Complete |
-| Scheduler (poll + --once) | Complete |
-| Planning cell workflow | **Smoke-tested ✓** (auto-approve wired, pending DATABASE_URL smoke test) |
-| LangGraph interrupt/resume | **Proven ✓** (MemorySaver) |
-| Engineering cell workflow | **Smoke-tested ✓** (T-003) |
-| Verification cell workflow | **Smoke-tested ✓** (T-003) |
-| LangGraph Postgres checkpointer | **Wired ✓** (pending DATABASE_URL + smoke test) |
-| Design cell | Stub (not implemented) |
-| Release cell | Stub (not implemented) |
+| Scheduler (plan/execution/verification/rework) | Complete + stale-job guards added |
+| Intake server (Telegram + GitHub + notifications) | Implemented, partial E2E |
+| Repo resolution + seed scan | Smoke-tested (T-004) |
+| Multi-repo engineering worktrees | Dogfood-tested (T-005/T-006 on `jackye426/swarm-sandbox`) |
+| Planning cell (fast path) | Smoke-tested |
+| Engineering cell | **Commit guard implemented** (contract + `.taskgraph*` excluded) |
+| Verification cell | Dogfood-tested T-005/T-006 |
+| Rework loop | Auto-enqueued on REWORK_REQUIRED |
+| Design / Release cells | Stub |
 
 ---
 
-## Completed Work
+## Active Focus
 
-### Repository
-- Pushed to [github.com/jackye426/agent-swarm](https://github.com/jackye426/agent-swarm) — initial commit on `main`
-- `.env` excluded; secrets never committed
+**Commit discipline fix landed.** Engineering now unstages `tasks/{id}/contract.yaml` and `.taskgraph*` before commit, repairs Claude self-commits when needed, and writes worktree `.gitignore` on all worktree paths.
 
-### T-001 — Task contract and evidence system
-- Status: **READY**
-- 6 acceptance criteria, 6 evidence records (E-001 – E-006)
-- `npm run validate` passes · `npm test` passes · `npm run typecheck` passes
+**Next:** Re-run `npm run pipeline:run -- T-007` once OpenRouter credits are topped up (T-007 seed exists; planning failed at 402 insufficient credits).
 
-### Planning cell smoke test (T-002)
-- Status: **AWAITING_APPROVAL** (correct — `stop_after_draft: true`)
-- All 6 artifacts produced: plan_a, plan_b, a_review_of_b, b_review_of_a, consensus, draft_contract
-
-### LangGraph Postgres checkpointer + auto-approve (implemented, pending smoke test)
-- `@langchain/langgraph-checkpoint-postgres@0.0.5` installed (compatible with our `@langchain/core@0.3.x`)
-- `humanApprovalGate` + `reviseContract` nodes removed from planning workflow
-- `autoApproveContract` node added: records `human_notification` artifact (Telegram hook), publishes contract, records approvals, transitions to READY
-- `getPlanningWorkflow()` lazy factory: uses `PostgresSaver` if `DATABASE_URL` set, falls back to `MemorySaver`
-- Scheduler passes `{ configurable: { thread_id: agentRunId } }` to `planningWorkflow.invoke()`
-- Migration `003_paused_status.sql` written + run in Supabase
-- Smoke test pending: needs `DATABASE_URL` password (Supabase direct connection, port 5432)
-- Expected result: T-002 ends at READY with `human_notification` + `approved_contract` artifacts
-
-### Engineering + Verification cell smoke test (T-003)
-- Task: Add GitHub Actions CI workflow (`.github/workflows/ci.yml`)
-- Engineering run: **complete** — typecheck ✓, 9/9 unit tests ✓, commit made ✓
-- Verification run: **complete** — all 5 ACs PASS ✓
-- Final status: **REWORK_REQUIRED** (correct — out-of-scope files committed; `.taskgraph_impl_plan.txt` now gitignored, contract scope updated)
-- Verification correctly identified scope violation without missing any criterion
-
-### LangGraph interrupt/resume (`npm run smoke:test:interrupt`)
-- **Passes** — synthetic two-node graph with `MemorySaver`
+Do not start compact deep planning or memory until T-007 (or T-008) completes a clean verification pass.
 
 ---
 
-## Bugs Fixed (Full History)
+## Session 5 — Commit discipline fix
 
-| # | Cell | File | Bug | Fix |
-|---|------|------|-----|-----|
-| 1 | Planning | `cells/planning/workflow.ts` | `draftContract` used as both LangGraph state channel and node name | Renamed node to `generateDraftContract` |
-| 2 | Planning | `core/model-router.ts` | Claude Opus wraps JSON in markdown fences despite `json_object` mode | Strip fences after receiving content |
-| 3 | Planning | `scheduler/index.ts` | Workflow errors stored in `state.error` but never surfaced | Capture `invoke()` return, throw if `.error` set |
-| 4 | Planning | `cells/planning/workflow.ts` | Contract prompt produced wrong field shapes | Explicit JSON skeleton in system prompt |
-| 5 | Engineering | `cells/engineering/workflow.ts` | `claude` is a `.ps1` on Windows; `execFile` can't run it | Use `runShellCommand` (wraps in `powershell.exe`) |
-| 6 | Engineering | `cells/engineering/workflow.ts` | Claude Code stopped at approval gate in T-002 contract | Prepend authorization header to plan prompt |
-| 7 | Engineering | `cells/engineering/workflow.ts` | `\|\|` invalid in PowerShell 5.1 in `installDependencies` | Split into sequential TypeScript calls |
-| 8 | Engineering | `cells/engineering/workflow.ts` | Worktree has no `node_modules` | Added `installDependencies` node (`npm ci`) |
-| 9 | Engineering | `cells/engineering/workflow.ts` | `validate-contract.ts` fails — no `contract.yaml` in worktree | `createWorktree` writes contract as YAML before anything else |
-| 10 | Engineering | `.env` + `workflow.ts` | `TASKGRAPH_DEFAULT_TEST_COMMANDS` env var included `validate` | Removed `npm run validate` — it's a repo CI gate, not a per-task test |
-| 11 | Engineering | `cells/engineering/workflow.ts` | Changes never committed; verification diff was empty | Added `commitChanges` node between `runTests` and `createPullRequest` |
-| 12 | All | `.gitignore` | `.taskgraph_impl_plan.txt` swept up by `git add -A` | Added to `.gitignore` |
+### Code changes
+
+| Module | Purpose |
+|--------|---------|
+| `src/cells/engineering/commit-guard.ts` | Path rules for excluded commit files |
+| `src/cells/engineering/commit-staging.ts` | Git staging + soft/mixed reset repair |
+| `src/cells/engineering/worktree-support.ts` | Contract copy + worktree `.gitignore` |
+| `src/cells/engineering/workflow.ts` | Wired into `createWorktree`, `commitChanges`, Claude prompt |
+| `src/cells/planning/workflow.ts` | Contract draft scope.out/in rules for contract + `.taskgraph*` |
+
+### Tests
+
+- `tests/commit-guard.test.ts` — path matching unit tests
+- `tests/commit-staging.test.ts` — git integration: only product files staged
+
+### T-007 dogfood
+
+- Seeded on `jackye426/swarm-sandbox` with incremental healthcheck goal
+- Pipeline blocked at planning: OpenRouter 402 (insufficient credits for `planning_b`)
+- Re-run: `npm run pipeline:run -- T-007` after adding credits
+
+## T-005 Dogfood Run — `jackye426/swarm-sandbox`
+
+First end-to-end run against an **external empty repo**.
+
+### What worked
+
+| Step | Result |
+|------|--------|
+| Planning on `jackye426/swarm-sandbox` | Draft contract reasonable and bounded |
+| Engineering on external repo | Cloned empty repo, implemented healthcheck project |
+| Tests in sandbox | `npm test` passes |
+| Evidence | 6 passing evidence records (E-005001–E-005006) at commit `0b09a79` |
+| Verification model review | Ran; verdict **REWORK_REQUIRED** recorded |
+
+### Edge cases fixed during the run
+
+- Empty external repos — orphan branch when remote has no `HEAD`
+- Git author identity — `TASKGRAPH_GIT_AUTHOR_NAME` / `TASKGRAPH_GIT_AUTHOR_EMAIL` for agent commits
+- Existing clone with empty remote `HEAD` — fetch/reset no longer fails
+- Reusing repo root when task branch already checked out
+- Generated `.taskgraph*` files excluded from commits
+- Zero-dependency `package.json` with no lockfile — skip `npm install`
+- Verification seed reads `engineering_worktree` artifact path (not assumed local layout)
+
+### Verification outcome (expected)
+
+Verifier returned **REWORK_REQUIRED** with all ACs **INCONCLUSIVE** because the PR diff/CI payload could not independently prove file contents (diff quality issue, not engineering failure). Blocking defects cited missing README/package.json/healthcheck.js in the diff.
+
+This is a **good verifier test** — it catches weak verification inputs.
+
+### Takeover fixes (session 4)
+
+1. **Stale queue jobs** — A leftover `task.execution.requested` re-ran while T-005 was past READY, failed tests, moved task to **BLOCKED**, then blocked verification status transition.
+2. **Scheduler guards** — Execution only when `READY`; rework only when `REWORK_REQUIRED`; verification only when `AWAITING_EVIDENCE` or `VERIFYING`; stale jobs are acked.
+3. **Verification transition** — Uses `transitionTaskStatusIfLegal`; saves record even if transition fails (no throw).
+4. **Recovery script** — `npm run recover:verdict -- T-005` applied saved verdict `BLOCKED → REWORK_REQUIRED` and enqueued rework.
+
+**Current T-005 status:** `REWORK_REQUIRED` (rework job enqueued, not yet processed).
 
 ---
 
-## Known Issues / Next Steps
+## Completed Work (historical)
 
-### 1. Planning cell Postgres checkpointer smoke test
-All code is wired. Blocked on `DATABASE_URL` password (Supabase Settings → Database → Reset database password — safe, no data loss).
+### T-001 — Contract and evidence foundation
+- Status: READY · validation passes
 
-Once unblocked:
-1. Add password to `DATABASE_URL` in `.env`
-2. `npm run smoke:seed -- T-002` (resets T-002 to DRAFT, enqueues full pipeline)
-3. `npm run scheduler:once`
-4. Expect T-002 → READY, `human_notification` + `approved_contract` artifacts written
+### T-002 — Planning smoke
+- AWAITING_APPROVAL with `stop_after_draft: true` · 6 planning artifacts
 
-### 2. Contract scope — evidence directory
-Future task contracts should explicitly include `tasks/{taskId}/evidence/` in scope.
-Claude Code naturally creates evidence files; without this the verifier flags them as out-of-scope.
+### T-003 — Engineering + verification smoke (local repo)
+- REWORK_REQUIRED (verifier caught out-of-scope files) · contract scope tightened
 
-### 3. Contract YAML immutability
-Claude Code updated `tasks/T-003/contract.yaml` status field to `DONE`.
-`commitChanges` should exclude the contract file from `git add` or the authorization prompt should say not to modify it.
+### T-004 — Slice 0 repo resolution smoke
+- `repo_full_name` + `seed_repo_context` confirmed
 
-### 4. Transient network errors (Bali → EU → US routing)
-Two runs hit `ECONNRESET` / `fetch failed` during Supabase writes or OpenRouter calls.
-Retry mechanism (visibility timeout) works but adds latency. A retry wrapper around `recordArtifact` and OpenRouter calls would improve robustness.
+### Intake + checkpointer
+- Intake server boots; Telegram/GitHub E2E partial
+- Postgres checkpointer wired; `TASKGRAPH_DISABLE_POSTGRES_CHECKPOINT=true` escape hatch for local smoke
+
+---
+
+## Known Issues
+
+| Issue | Notes |
+|-------|-------|
+| Stale queue messages | Guarded in scheduler; drain with `scheduler:once` until stale jobs ack |
+| Verification diff quality | `smoke:seed:verification` diff may be empty/thin for first commit; verifier correctly returns INCONCLUSIVE |
+| T-003 evidence missing | `npm run validate` fails honestly — no fake evidence |
+| Contract immutability | **Fixed** — `commitChanges` unstages contract + `.taskgraph*`; worktree `.gitignore` |
+| Transient network | Supabase/OpenRouter `fetch failed` on long routes; retry wrapper still useful |
 
 ---
 
@@ -108,41 +134,33 @@ Retry mechanism (visibility timeout) works but adds latency. A retry wrapper aro
 
 | Script | Purpose |
 |--------|---------|
-| `npm run smoke:seed -- T-002` | Seed planning job |
-| `npm run smoke:seed:engineering -- T-002` | Promote T-002 to READY, enqueue execution |
-| `npm run smoke:reset:engineering -- T-NNN` | Drain stale messages, reset to READY, re-enqueue |
-| `npm run seed:t003` | Seed T-003 directly to READY (skips planning) |
-| `npm run smoke:seed:verification -- T-NNN` | Enqueue verification with real diff + CI output |
-| `npm run smoke:inspect -- T-NNN` | Show task, runs, artifacts, evidence, verification |
-| `npm run smoke:test:interrupt` | MemorySaver interrupt/resume proof (no API calls) |
-| `npm run scheduler:once` | Process one round of all queues |
-| `npm run scheduler` | Continuous poll loop |
-| `npm run validate` | Contract + evidence schema validation |
-| `npm test` | Unit tests |
-| `npm run typecheck` | TypeScript check |
+| `npm run smoke:seed -- T-NNN [--repo owner/repo]` | Seed planning with repo resolution |
+| `npm run smoke:seed:engineering -- T-NNN` | Enqueue execution |
+| `npm run smoke:seed:verification -- T-NNN` | Enqueue verification from worktree diff |
+| `npm run recover:verdict -- T-NNN` | Apply saved verification verdict after failed transition |
+| `npm run smoke:inspect -- T-NNN` | Full task inspection |
+| `npm run scheduler:once` | One poll cycle (plan/execution/verification/rework) |
+| `npm run intake` | Telegram + GitHub + notifications |
 
 ---
 
-## Architecture Quick Reference
+## Architecture (current dogfood path)
 
-```
-Queue job arrives
-      │
-  Scheduler polls (src/scheduler/index.ts)
-      │
-  Creates agent_run record in Supabase
-      │
-  Dispatches to cell workflow (LangGraph)
-      │
-  Planning     ──▶  plan_a + plan_b (parallel) → peer reviews → consensus → draft contract
-  Engineering  ──▶  context packet → git worktree → npm ci → plan → Claude Code
-                    → tests (typecheck + npm test) → commit → PR deferred → evidence records
-  Verification ──▶  read contract + diff + CI output → model review → criterion verdicts → verdict
-      │
-  Cell writes status transition + artifacts to Supabase
-      │
-  Scheduler: completeAgentRun + ack  (success)
-             failAgentRun            (error — message re-queues after visibility timeout)
+```text
+resolve repo (jackye426/swarm-sandbox)
+  -> seed scan -> fast planning -> auto-approve -> READY
+  -> engineering (clone empty repo, worktree, Claude Code, tests, commit)
+  -> AWAITING_EVIDENCE + evidence records
+  -> verification (model review + verdict)
+  -> REWORK_REQUIRED (rework enqueued)
 ```
 
-Source of truth: **Supabase Postgres** (not LangGraph checkpoints).
+---
+
+## Plan Docs
+
+| Doc | Status |
+|-----|--------|
+| `plans/production-hardening.md` | Slices 0-3 implemented; T-005 validates multi-repo engineering |
+| `plans/deep-planning-memory.md` | Not started — wait until dogfood stable |
+| `plans/postgres-checkpointer.md` | Wired; full smoke pending `DATABASE_URL` |

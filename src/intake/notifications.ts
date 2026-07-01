@@ -21,6 +21,12 @@ function formatNotification(payload: NotificationPayload): string {
         `Planning complete. Task is now READY for engineering.\n` +
         `Run \`/status ${payload.task_id}\` to check.`
       );
+    case "rework_escalated":
+      return (
+        `🚫 ${taskLink} — BLOCKED after max rework attempts\n\n` +
+        `${payload.message ?? ""}\n\n` +
+        `Revise the contract scope or intervene manually.`
+      );
     default:
       return `📬 ${taskLink}: ${payload.message ?? payload.type}`;
   }

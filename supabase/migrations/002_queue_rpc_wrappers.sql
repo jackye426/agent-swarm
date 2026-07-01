@@ -23,8 +23,13 @@ language sql
 security definer
 set search_path = pgmq, public
 as $$
-  select *
-  from pgmq.read(queue_name, vt, qty);
+  select
+    r.msg_id,
+    r.read_ct,
+    r.enqueued_at,
+    r.vt,
+    r.message
+  from pgmq.read(queue_name, vt, qty) as r;
 $$;
 
 create or replace function public.pgmq_delete(queue_name text, msg_id bigint)
@@ -49,6 +54,12 @@ language sql
 security definer
 set search_path = pgmq, public
 as $$
-  select *
-  from pgmq.metrics(queue_name);
+  select
+    m.queue_name,
+    m.queue_length,
+    m.newest_msg_age_sec,
+    m.oldest_msg_age_sec,
+    m.total_messages,
+    m.scrape_time
+  from pgmq.metrics(queue_name) as m;
 $$;

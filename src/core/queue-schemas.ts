@@ -5,6 +5,8 @@ export const PlanRequestedPayloadSchema = z.object({
   goal: z.string().min(1),
   context: z.string().default(""),
   stop_after_draft: z.boolean().default(false),
+  repo_full_name: z.string().regex(/^[\w.-]+\/[\w.-]+$/).optional(),
+  repo_url: z.string().url().optional(),
 });
 
 export const ExecutionRequestedPayloadSchema = z.object({
@@ -21,6 +23,14 @@ export const VerificationRequestedPayloadSchema = z.object({
   source_url: z.string().url().optional(),
 });
 
+export const ReworkRequestedPayloadSchema = z.object({
+  task_id: z.string().regex(/^T-\d+$/),
+  blocking_defects: z.array(z.string()).default([]),
+  missing_evidence: z.array(z.string()).default([]),
+  rework_attempt: z.number().int().min(1),
+});
+
 export type PlanRequestedPayload = z.infer<typeof PlanRequestedPayloadSchema>;
 export type ExecutionRequestedPayload = z.infer<typeof ExecutionRequestedPayloadSchema>;
 export type VerificationRequestedPayload = z.infer<typeof VerificationRequestedPayloadSchema>;
+export type ReworkRequestedPayload = z.infer<typeof ReworkRequestedPayloadSchema>;

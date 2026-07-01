@@ -10,6 +10,13 @@ import { assertComplete, assertTransition, canTransition } from "../src/core/sta
 import { physicalQueueName } from "../src/core/queue-names.js";
 import { deriveTaskVerdict, findMissingEvidence } from "../src/core/verification.js";
 import { modelForRole } from "../src/core/model-router.js";
+import {
+  classifyVerificationMethod,
+  primaryAcKind,
+  validateContractExecutability,
+  resolveTestCommandsFromPacket,
+  formatContextForEngineering,
+} from "../src/core/contract-executability.js";
 
 const contract = TaskContractSchema.parse({
   id: "T-999",
@@ -152,6 +159,105 @@ test("verification helpers require passing evidence for completion", () => {
     }),
     "BLOCKED"
   );
+});
+
+test("verification method taxonomy classifies command, diff, and human methods", () => {
+  assert.equal(classifyVerificationMethod("npm test"), "command");
+  assert.equal(classifyVerificationMethod("Inspect workflow steps in diff"), "diff_inspection");
+  assert.equal(classifyVerificationMethod("Manual review by Engineering Owner"), "human");
+  assert.equal(classifyVerificationMethod("Works as expected"), "unknown");
+});
+
+test("executability rejects human-only acceptance criteria", () => {
+  const humanOnly = {
+    ...contract,
+    acceptance_criteria: [
+      {
+        id: "AC-1",
+        requirement: "Someone looks at it.",
+        verification: ["Manual review by Engineering Owner"],
+      },
+    ],
+  };
+  const result = validateContractExecutability(humanOnly);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.includes("AC-1")));
+});
+
+test("executability accepts diff-inspection criteria (T-003 style)", () => {
+  const diffContract = {
+    ...contract,
+    acceptance_criteria: [
+      {
+        id: "AC-1",
+        requirement: ".github/workflows/ci.yml exists.",
+        verification: ["File presence check in PR diff"],
+      },
+      {
+        id: "AC-2",
+        requirement: "Tests pass in CI.",
+        verification: ["npm test"],
+      },
+    ],
+  };
+  const result = validateContractExecutability(diffContract);
+  assert.equal(result.ok, true);
+  assert.equal(primaryAcKind(result.acClassifications["AC-1"]!), "diff_inspection");
+});
+
+test("executability flags command mismatch against seed test commands", () => {
+  const cmdContract = {
+    ...contract,
+    acceptance_criteria: [
+      {
+        id: "AC-1",
+        requirement: "Custom script passes.",
+        verification: ["npm run custom:check"],
+      },
+    ],
+  };
+  const result = validateContractExecutability(cmdContract, {
+    testCommands: ["npm test"],
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.includes("custom:check")));
+});
+
+test("resolveTestCommandsFromPacket prefers payload then packet then seed", () => {
+  const packet = {
+    test_commands: ["npm run typecheck"],
+    seed: { test_commands: ["npm test"] },
+  };
+  assert.deepEqual(resolveTestCommandsFromPacket(packet, ["npm run validate"]), ["npm run validate"]);
+  assert.deepEqual(resolveTestCommandsFromPacket(packet), ["npm run typecheck"]);
+  assert.deepEqual(resolveTestCommandsFromPacket({ seed: { test_commands: ["npm test"] } }), ["npm test"]);
+});
+
+test("executability accepts diff-only contracts (T-003 reference)", () => {
+  const t003Style = {
+    ...contract,
+    acceptance_criteria: [
+      {
+        id: "AC-1",
+        requirement: ".github/workflows/ci.yml exists.",
+        verification: ["File presence check in PR diff"],
+      },
+      {
+        id: "AC-2",
+        requirement: "Workflow triggers on push and pull_request.",
+        verification: ["Inspect workflow on/push/branches fields in diff"],
+      },
+    ],
+  };
+  const result = validateContractExecutability(t003Style, { requireCommandAc: true });
+  assert.equal(result.ok, true);
+});
+
+test("formatContextForEngineering uses planning_context when present", () => {
+  const formatted = formatContextForEngineering({
+    planning_context: "User goal context\n--- Seed repo context ---",
+  });
+  assert.match(formatted, /User goal context/);
 });
 
 test("model router resolves role-specific model overrides", () => {

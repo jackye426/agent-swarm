@@ -8,7 +8,7 @@ async function main(): Promise<void> {
   const [taskRes, runsRes, artifactsRes, evidenceRes, verificationRes] = await Promise.all([
     db
       .from("tasks")
-      .select("id,title,status,cell,contract_version,updated_at")
+      .select("id,title,status,cell,contract_version,repo_full_name,repo_url,source,updated_at")
       .eq("id", taskId)
       .single(),
     db

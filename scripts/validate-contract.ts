@@ -6,8 +6,10 @@ import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
 import { TaskContractSchema } from "../src/core/schemas.js";
+import { validateContractExecutability } from "../src/core/contract-executability.js";
 
 const TASKS_DIR = path.resolve("tasks");
+const strictMode = process.argv.includes("--strict");
 let hasErrors = false;
 
 function validateFile(filePath: string, expectedTaskId: string): void {
@@ -46,6 +48,19 @@ function validateFile(filePath: string, expectedTaskId: string): void {
         fileHasErrors = true;
       }
     }
+
+    if (strictMode && !fileHasErrors) {
+      const execResult = validateContractExecutability(contract, { requireCommandAc: true });
+      if (!execResult.ok) {
+        console.error(`[FAIL] ${filePath}: executability validation failed`);
+        for (const err of execResult.errors) {
+          console.error(`  ${err}`);
+        }
+        hasErrors = true;
+        fileHasErrors = true;
+      }
+    }
+
     if (!fileHasErrors) {
       console.log(`[PASS] ${filePath} (${contract.id}: ${contract.title})`);
     }

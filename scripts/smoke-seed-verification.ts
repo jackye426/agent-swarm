@@ -59,7 +59,19 @@ async function main(): Promise<void> {
   let commitSha: string | undefined;
 
   const worktreeRoot = process.env.TASKGRAPH_WORKTREE_ROOT ?? path.join(os.tmpdir(), "taskgraph-os");
-  const worktreePath = path.join(worktreeRoot, taskId);
+  let worktreePath = path.join(worktreeRoot, taskId);
+
+  const { data: worktreeArtifact } = await db
+    .from("artifacts")
+    .select("content")
+    .eq("task_id", taskId)
+    .eq("artifact_type", "engineering_worktree")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const artifactPath = (worktreeArtifact?.content as { path?: string } | null)?.path;
+  if (artifactPath) worktreePath = artifactPath;
 
   const diffResult = await runCommand("git", ["diff", "HEAD~1", "HEAD", "--stat", "--patch"], { cwd: worktreePath });
   if (diffResult.exitCode === 0 && diffResult.stdout.trim()) {

@@ -3,6 +3,7 @@ import {
   assertComplete,
   assertReady,
   assertTransition,
+  canTransition,
   type CompletionContext,
   type ReadinessContext,
 } from "../core/state-machine.js";
@@ -69,6 +70,14 @@ export async function transitionTaskStatus(options: TransitionTaskOptions): Prom
   if (eventError) {
     throw new Error(`Task ${options.taskId} transitioned but event write failed: ${eventError.message}`);
   }
+}
+
+/** Transition when legal; returns false without throwing if the edge is not allowed. */
+export async function transitionTaskStatusIfLegal(options: TransitionTaskOptions): Promise<boolean> {
+  const from = await getTaskStatus(options.taskId);
+  if (!canTransition(from, options.to)) return false;
+  await transitionTaskStatus(options);
+  return true;
 }
 
 export async function getTaskStatus(taskId: string): Promise<TaskStatus> {

@@ -67,7 +67,7 @@ acceptance_criteria:
   - id: AC-6
     requirement: The example task demonstrates the full contract-to-evidence lifecycle.
     verification:
-      - Manual review by Engineering Owner
+      - Example task folder passes npm run validate scripts
 
 risks:
   - risk: Schema drift between YAML files and Zod validators.
