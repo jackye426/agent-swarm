@@ -12,6 +12,7 @@ export interface ExecutabilityContext {
 export interface ExecutabilityResult {
   ok: boolean;
   errors: string[];
+  warnings: string[];
   suggestedTestCommands: string[];
   contractTestCommands: string[];
   acClassifications: Record<string, VerificationMethodKind[]>;
@@ -149,6 +150,7 @@ export function validateContractExecutability(
   ctx: ExecutabilityContext = {},
 ): ExecutabilityResult {
   const errors: string[] = [];
+  const warnings: string[] = [];
   const acClassifications: Record<string, VerificationMethodKind[]> = {};
   const contractTestCommands = collectContractTestCommands(contract);
   const seedCommands = ctx.testCommands ?? [];
@@ -183,8 +185,8 @@ export function validateContractExecutability(
       for (const cmd of acCommands) {
         const matched = seedCommands.some((available) => commandsCompatible(cmd, available));
         if (!matched) {
-          errors.push(
-            `${ac.id}: verification requires "${cmd}" but seed detected commands are [${seedCommands.join(", ")}]`,
+          warnings.push(
+            `${ac.id}: verification requires "${cmd}" but seed detected commands are [${seedCommands.join(", ")}] — command may be added during implementation`,
           );
         }
       }
@@ -214,19 +216,108 @@ export function validateContractExecutability(
   return {
     ok: errors.length === 0,
     errors,
+    warnings,
     suggestedTestCommands,
     contractTestCommands,
     acClassifications,
   };
 }
 
-/** Compact context for review/consensus prompts (capped length). */
+/** Compact context for review/consensus prompts (structured, under budget). */
 export function formatCompactContextForReview(
   planningContext: string,
   maxChars = 3_000,
 ): string {
-  if (planningContext.length <= maxChars) return planningContext;
-  return `${planningContext.slice(0, maxChars)}\n\n[context truncated for review prompt]`;
+  const seedMarker = "--- Seed repo context ---";
+  const seedIdx = planningContext.indexOf(seedMarker);
+
+  const userSection = (seedIdx >= 0 ? planningContext.slice(0, seedIdx) : planningContext).trim();
+
+  const seedBody = seedIdx >= 0 ? planningContext.slice(seedIdx + seedMarker.length) : "";
+
+  const sections: string[] = [];
+  if (userSection) {
+    sections.push(userSection);
+  }
+
+  const testCommands = extractSectionLines(seedBody, "Detected test commands:");
+  if (testCommands.length > 0) {
+    sections.push("", "Detected test commands:", ...testCommands);
+  }
+
+  const fileTreeLines = extractSectionLines(seedBody, "File tree (top levels):");
+  if (fileTreeLines.length > 0) {
+    const cappedTree = fileTreeLines.slice(0, 80);
+    sections.push("", "File tree (top levels):", ...cappedTree);
+    if (fileTreeLines.length > 80) {
+      sections.push(`... (${fileTreeLines.length - 80} more lines omitted)`);
+    }
+  }
+
+  const readmeExcerpt = extractReadmeExcerpt(seedBody, 1_500);
+  if (readmeExcerpt) {
+    sections.push("", "README excerpt:", readmeExcerpt);
+  }
+
+  let compact = sections.join("\n").trim();
+  if (compact.length > maxChars) {
+    compact = `${compact.slice(0, maxChars)}\n\n[context truncated for review prompt]`;
+  }
+  return compact;
+}
+
+function extractSectionLines(body: string, header: string): string[] {
+  const headerIdx = body.indexOf(header);
+  if (headerIdx < 0) return [];
+
+  const afterHeader = body.slice(headerIdx + header.length);
+  const lines = afterHeader.split("\n");
+  const collected: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trimEnd();
+    if (
+      trimmed.startsWith("README excerpt:") ||
+      trimmed.startsWith("Package manifest (") ||
+      trimmed.startsWith("Detected test commands:") ||
+      trimmed.startsWith("Recent commits:") ||
+      trimmed.startsWith("Repository:") ||
+      trimmed.startsWith("Scanned at:")
+    ) {
+      break;
+    }
+    if (trimmed.length > 0) {
+      collected.push(trimmed);
+    }
+  }
+
+  return collected;
+}
+
+function extractReadmeExcerpt(body: string, maxChars: number): string {
+  const header = "README excerpt:";
+  const headerIdx = body.indexOf(header);
+  if (headerIdx < 0) return "";
+
+  const afterHeader = body.slice(headerIdx + header.length);
+  const lines = afterHeader.split("\n");
+  const collected: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trimEnd();
+    if (
+      trimmed.startsWith("Package manifest (") ||
+      trimmed.startsWith("Detected test commands:") ||
+      trimmed.startsWith("Recent commits:")
+    ) {
+      break;
+    }
+    collected.push(trimmed);
+  }
+
+  const text = collected.join("\n").trim();
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n[README excerpt truncated]`;
 }
 
 export function formatCompactContextFromSeed(

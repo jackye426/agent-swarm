@@ -19,12 +19,12 @@ export function createServer(): express.Application {
   return app;
 }
 
-export async function startServer(port: number): Promise<void> {
+export async function startServer(port: number): Promise<import("node:http").Server> {
   const app = createServer();
-  await new Promise<void>((resolve) => {
-    app.listen(port, () => {
+  return new Promise((resolve) => {
+    const server = app.listen(port, () => {
       console.log(`[Intake] HTTP server listening on port ${port}`);
-      resolve();
+      resolve(server);
     });
   });
 }

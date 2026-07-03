@@ -10,6 +10,7 @@
 import "dotenv/config";
 import { db } from "../src/db/client.js";
 import { enqueue } from "../src/db/queue.js";
+import { getReworkAttemptCount } from "../src/db/records.js";
 import type { TaskStatus, TaskVerdict } from "../src/core/types.js";
 
 const taskId = process.argv[2];
@@ -70,6 +71,7 @@ async function main(): Promise<void> {
   if (verdict === "REWORK_REQUIRED") {
     const blocking = (verification as { blocking_defects: string[] }).blocking_defects ?? [];
     const missing = (verification as { missing_evidence: string[] }).missing_evidence ?? [];
+    const reworkAttemptsDone = await getReworkAttemptCount(taskId);
     await enqueue({
       job_type: "task.rework.requested",
       task_id: taskId,
@@ -77,7 +79,7 @@ async function main(): Promise<void> {
         task_id: taskId,
         blocking_defects: blocking,
         missing_evidence: missing,
-        rework_attempt: 1,
+        rework_attempt: reworkAttemptsDone + 1,
       },
     });
     console.log("Enqueued task.rework.requested");

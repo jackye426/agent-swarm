@@ -1,16 +1,17 @@
 import { db } from "../db/client.js";
 import { sendNotification } from "./telegram.js";
 
-interface NotificationPayload {
+export interface NotificationPayload {
   type: string;
   task_id: string;
   contract_title?: string;
   message?: string;
+  errors?: string[];
   agent_run_id?: string;
 }
 
 // Formats a human_notification artifact into a Telegram message.
-function formatNotification(payload: NotificationPayload): string {
+export function formatNotification(payload: NotificationPayload): string {
   const taskLink = `*${payload.task_id}*`;
 
   switch (payload.type) {
@@ -20,6 +21,23 @@ function formatNotification(payload: NotificationPayload): string {
         `*${payload.contract_title ?? ""}*\n` +
         `Planning complete. Task is now READY for engineering.\n` +
         `Run \`/status ${payload.task_id}\` to check.`
+      );
+    case "contract_validation_failed": {
+      const errorLines =
+        payload.errors && payload.errors.length > 0
+          ? payload.errors.map((e) => `• ${e}`).join("\n")
+          : "(no error details)";
+      return (
+        `⚠️ ${taskLink} — contract validation failed\n` +
+        `*${payload.contract_title ?? ""}*\n` +
+        `Executability errors:\n${errorLines}\n` +
+        `Check the contract_validation_failed artifact for details.`
+      );
+    }
+    case "task_complete":
+      return (
+        `🎉 ${taskLink} — COMPLETE\n\n` +
+        `${payload.message ?? "Verification passed. Task is complete."}`
       );
     case "rework_escalated":
       return (

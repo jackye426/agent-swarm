@@ -27,6 +27,9 @@ jobs:
       - name: Validate task contracts
         run: npm run validate:contracts
 
+      - name: Validate task contracts (strict executability)
+        run: npm run validate:contracts:strict
+
       - name: Validate evidence records
         run: npm run validate:evidence
 

@@ -3,6 +3,7 @@ import type { Request, Response, Router } from "express";
 import { Router as createRouter } from "express";
 import { createAndEnqueueTask } from "../task-creator.js";
 import { resolveRepoForIntake } from "../repo-resolver.js";
+import { formatIntakeUserContext } from "../intake-context.js";
 import { sendNotification } from "../telegram.js";
 
 const router: Router = createRouter();
@@ -53,6 +54,7 @@ router.post("/webhook/github", async (req: Request, res: Response) => {
 
   const goal = issue.title;
   const context = [
+    formatIntakeUserContext("github"),
     `GitHub issue: ${issue.html_url}`,
     `Repository: ${repoFullName}`,
     issue.body ? `\nIssue description:\n${issue.body}` : "",

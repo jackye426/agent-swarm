@@ -1,37 +1,46 @@
 #!/usr/bin/env tsx
 
-import { db } from "../src/db/client.js";
-import { physicalQueueName } from "../src/core/queue-names.js";
-import type { QueueJobType } from "../src/core/types.js";
+import "dotenv/config";
+import {
+  defaultHealthProbeDeps,
+  formatProbeResults,
+  runHealthProbes,
+  type SupabaseProbeClient,
+} from "./lib/health-probes.js";
 
-const queues: QueueJobType[] = [
-  "task.plan.requested",
-  "task.design.requested",
-  "task.execution.requested",
-  "task.verification.requested",
-  "task.release.requested",
-  "task.rework.requested",
-];
+function parseArgs(argv: string[]): { json: boolean; strict: boolean } {
+  return {
+    json: argv.includes("--json"),
+    strict: argv.includes("--strict"),
+  };
+}
 
 async function main(): Promise<void> {
-  const requiredEnv = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "OPENROUTER_API_KEY"];
-  const missing = requiredEnv.filter((key) => !process.env[key]);
-  if (missing.length > 0) {
-    throw new Error(`Missing required environment variables: ${missing.join(", ")}`);
+  const { json, strict } = parseArgs(process.argv.slice(2));
+  const deps = defaultHealthProbeDeps();
+
+  let db: SupabaseProbeClient | undefined;
+  if (deps.env.SUPABASE_URL?.trim() && deps.env.SUPABASE_SERVICE_ROLE_KEY?.trim()) {
+    const client = await import("../src/db/client.js");
+    db = client.db as unknown as SupabaseProbeClient;
   }
 
-  const { error: taskError } = await db.from("tasks").select("id").limit(1);
-  if (taskError) throw new Error(`Cannot read tasks table: ${taskError.message}`);
+  const summary = await runHealthProbes(deps, { strict, db });
 
-  for (const queue of queues) {
-    const physical = physicalQueueName(queue);
-    const { error } = await db.rpc("pgmq_metrics", { queue_name: physical });
-    if (error) {
-      throw new Error(`Queue ${physical} is not available: ${error.message}`);
+  if (json) {
+    console.log(JSON.stringify(summary, null, 2));
+  } else {
+    console.log(formatProbeResults(summary.results, strict));
+    if (summary.ok) {
+      console.log("\nTaskGraph OS healthcheck passed.");
+    } else {
+      console.error("\nTaskGraph OS healthcheck failed.");
     }
   }
 
-  console.log("TaskGraph OS healthcheck passed.");
+  if (!summary.ok) {
+    process.exit(1);
+  }
 }
 
 main().catch((err) => {

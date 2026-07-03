@@ -22,6 +22,7 @@ import {
   failAgentRun,
   getLatestContextPacket,
   getLatestContract,
+  getLatestVerificationRecord,
   listEvidenceRecords,
 } from "../db/records.js";
 import { ReworkRequestedPayloadSchema } from "../core/queue-schemas.js";
@@ -31,9 +32,21 @@ import {
   formatContextForEngineering,
   resolveTestCommandsFromPacket,
 } from "../core/contract-executability.js";
+import { formatReworkContextForEngineering } from "../core/rework-context.js";
 import { getPlanningWorkflow } from "../cells/planning/workflow.js";
 import { engineeringWorkflow } from "../cells/engineering/workflow.js";
 import { verificationWorkflow } from "../cells/verification/workflow.js";
+import {
+  autoEnqueueVerificationIfEnabled,
+  enqueueVerificationForTask,
+} from "../../scripts/lib/verification-enqueue.js";
+import {
+  isStaleExecutionJob,
+  isStalePlanningJob,
+  isStaleReworkJob,
+  isStaleVerificationJob,
+} from "./guards.js";
+import { WORKER_TYPE_BY_QUEUE } from "../core/worker-types.js";
 
 const QUEUES: QueueJobType[] = [
   "task.plan.requested",
@@ -57,14 +70,7 @@ function queueCell(queueName: QueueJobType): CellType {
 }
 
 function queueWorkerType(queueName: QueueJobType): string {
-  switch (queueName) {
-    case "task.plan.requested": return "planning-cell";
-    case "task.execution.requested": return "engineering-cell";
-    case "task.verification.requested": return "verification-cell";
-    case "task.design.requested": return "design-cell";
-    case "task.release.requested": return "release-cell";
-    case "task.rework.requested": return "rework-cell";
-  }
+  return WORKER_TYPE_BY_QUEUE[queueName];
 }
 
 async function transitionIfLegal(taskId: string, to: Parameters<typeof transitionTaskStatus>[0]["to"]): Promise<void> {
@@ -87,7 +93,7 @@ async function processJob(queueName: QueueJobType, payload: Record<string, unkno
     case "task.plan.requested": {
       const parsed = PlanRequestedPayloadSchema.parse(payload);
       const planStatus = await getTaskStatus(parsed.task_id);
-      if (planStatus !== "DRAFT" && planStatus !== "PLANNING") {
+      if (isStalePlanningJob(planStatus)) {
         console.log(
           `[Scheduler] Stale planning job for ${parsed.task_id} (status=${planStatus}) — acking`,
         );
@@ -118,7 +124,7 @@ async function processJob(queueName: QueueJobType, payload: Record<string, unkno
     case "task.execution.requested": {
       const parsed = ExecutionRequestedPayloadSchema.parse(payload);
       const execStatus = await getTaskStatus(parsed.task_id);
-      if (execStatus !== "READY") {
+      if (isStaleExecutionJob(execStatus)) {
         console.log(
           `[Scheduler] Stale execution job for ${parsed.task_id} (status=${execStatus}, expected READY) — acking`,
         );
@@ -152,15 +158,21 @@ async function processJob(queueName: QueueJobType, payload: Record<string, unkno
         contract,
         contextPacket: formatContextForEngineering(packetContent),
         testCommands: resolvedTestCommands,
+        preserveWorktreeBase: false,
       });
       if (engResult.error) throw new Error(`Engineering workflow error: ${engResult.error}`);
+
+      const postExecStatus = await getTaskStatus(parsed.task_id);
+      if (postExecStatus === "AWAITING_EVIDENCE") {
+        await autoEnqueueVerificationIfEnabled(parsed.task_id);
+      }
       break;
     }
 
     case "task.rework.requested": {
       const parsed = ReworkRequestedPayloadSchema.parse(payload);
       const reworkStatus = await getTaskStatus(parsed.task_id);
-      if (reworkStatus !== "REWORK_REQUIRED") {
+      if (isStaleReworkJob(reworkStatus)) {
         console.log(
           `[Scheduler] Stale rework job for ${parsed.task_id} (status=${reworkStatus}, expected REWORK_REQUIRED) — acking`,
         );
@@ -184,32 +196,40 @@ async function processJob(queueName: QueueJobType, payload: Record<string, unkno
         missing_evidence: parsed.missing_evidence,
       });
 
-      // Inject defect context so the engineering cell knows what to fix.
-      const defectContext =
-        parsed.blocking_defects.length > 0
-          ? `\n\nRework attempt ${parsed.rework_attempt}. Fix these defects from the last verification:\n` +
-            parsed.blocking_defects.map((d) => `- ${d}`).join("\n") +
-            (parsed.missing_evidence.length > 0
-              ? `\n\nMissing evidence:\n${parsed.missing_evidence.map((e) => `- ${e}`).join("\n")}`
-              : "")
-          : "";
+      const latestVerification = await getLatestVerificationRecord(parsed.task_id);
+      const reworkContext = formatReworkContextForEngineering({
+        contract: reworkContract,
+        baseContext: formatContextForEngineering(existingPacket),
+        reworkAttempt: parsed.rework_attempt,
+        blockingDefects: parsed.blocking_defects,
+        missingEvidence: parsed.missing_evidence,
+        verdict: latestVerification?.verdict,
+        criterionVerdicts: latestVerification?.criterionVerdicts,
+      });
 
       const reworkResult = await engineeringWorkflow.invoke({
         taskId: parsed.task_id,
         agentRunId,
         contextPacketId: reworkContextPacketId,
         contract: reworkContract,
-        contextPacket: formatContextForEngineering(existingPacket) + defectContext,
+        contextPacket: reworkContext,
         testCommands: reworkTestCommands,
+        preserveWorktreeBase: true,
       });
       if (reworkResult.error) throw new Error(`Rework workflow error: ${reworkResult.error}`);
+
+      const postReworkStatus = await getTaskStatus(parsed.task_id);
+      if (postReworkStatus === "AWAITING_EVIDENCE") {
+        await enqueueVerificationForTask(parsed.task_id);
+        console.log(`[Scheduler] Auto-enqueued verification after rework for ${parsed.task_id}`);
+      }
       break;
     }
 
     case "task.verification.requested": {
       const parsed = VerificationRequestedPayloadSchema.parse(payload);
       const verifyStatus = await getTaskStatus(parsed.task_id);
-      if (verifyStatus !== "AWAITING_EVIDENCE" && verifyStatus !== "VERIFYING") {
+      if (isStaleVerificationJob(verifyStatus)) {
         console.log(
           `[Scheduler] Stale verification job for ${parsed.task_id} (status=${verifyStatus}) — acking`,
         );
@@ -279,21 +299,40 @@ export async function poll(): Promise<void> {
 
 const WORKER_COUNT = Number(process.env.SCHEDULER_WORKERS ?? 1);
 
+// Graceful shutdown: on SIGINT/SIGTERM finish the in-flight poll (durable
+// writes complete, message gets acked), then stop. A crash mid-job is still
+// safe — the unacked message reappears after the pgmq visibility timeout.
+let shuttingDown = false;
+
+function requestShutdown(signal: string): void {
+  if (shuttingDown) {
+    console.log(`[Scheduler] ${signal} received again — forcing exit`);
+    process.exit(1);
+  }
+  shuttingDown = true;
+  console.log(`[Scheduler] ${signal} received — finishing in-flight job, then stopping`);
+}
+
 async function runWorker(workerId: number): Promise<void> {
   console.log(`[Scheduler] Worker ${workerId} started`);
-  while (true) {
+  while (!shuttingDown) {
     await poll();
+    if (shuttingDown) break;
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
+  console.log(`[Scheduler] Worker ${workerId} stopped`);
 }
 
 export async function run(): Promise<void> {
   console.log(`[Scheduler] Starting TaskGraph OS scheduler (${WORKER_COUNT} worker(s))`);
+  process.on("SIGINT", () => requestShutdown("SIGINT"));
+  process.on("SIGTERM", () => requestShutdown("SIGTERM"));
   // Each worker independently dequeues from all queues. pgmq visibility timeout
   // ensures a message is only processed by one worker at a time.
   await Promise.all(
     Array.from({ length: WORKER_COUNT }, (_, i) => runWorker(i + 1)),
   );
+  console.log("[Scheduler] Shutdown complete");
 }
 
 async function main(): Promise<void> {

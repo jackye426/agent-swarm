@@ -12,6 +12,7 @@ import {
   type ExecutabilityResult,
 } from "../core/contract-executability.js";
 import type { SeedRepoContext } from "../intake/repo-scanner.js";
+import { WORKER_TYPE_REWORK } from "../core/worker-types.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -101,6 +102,43 @@ export async function recordArtifact(input: RecordArtifactInput): Promise<string
 
   assertNoError(error, `Failed to record artifact ${input.artifactType} for ${input.taskId}`);
   return (data as { id: string }).id;
+}
+
+export interface LatestEngineeringWorktree {
+  path?: string;
+  branch?: string;
+  baseSha?: string | null;
+  headSha?: string | null;
+}
+
+export async function getLatestEngineeringWorktree(
+  taskId: string,
+): Promise<LatestEngineeringWorktree | null> {
+  const { data, error } = await db
+    .from("artifacts")
+    .select("content")
+    .eq("task_id", taskId)
+    .eq("artifact_type", "engineering_worktree")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  assertNoError(error, `Failed to load engineering worktree for ${taskId}`);
+  if (!data?.content) return null;
+
+  const content = data.content as {
+    path?: string;
+    branch?: string;
+    base_sha?: string | null;
+    head_sha?: string | null;
+  };
+
+  return {
+    path: content.path,
+    branch: content.branch,
+    baseSha: content.base_sha ?? null,
+    headSha: content.head_sha ?? null,
+  };
 }
 
 export async function publishContractVersion(taskId: string, contract: TaskContract): Promise<number> {
@@ -268,6 +306,42 @@ export async function recordVerification(input: RecordVerificationInput): Promis
   return (data as { id: string }).id;
 }
 
+export interface LatestVerificationRecord {
+  verdict: TaskVerdict;
+  blockingDefects: string[];
+  missingEvidence: string[];
+  criterionVerdicts: Record<string, CriterionVerdict>;
+}
+
+export async function getLatestVerificationRecord(
+  taskId: string,
+): Promise<LatestVerificationRecord | null> {
+  const { data, error } = await db
+    .from("verification_records")
+    .select("verdict, blocking_defects, missing_evidence, criterion_verdicts")
+    .eq("task_id", taskId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw new Error(`Failed to load verification for ${taskId}: ${error.message}`);
+  if (!data) return null;
+
+  const row = data as {
+    verdict: TaskVerdict;
+    blocking_defects: string[];
+    missing_evidence: string[];
+    criterion_verdicts: Record<string, CriterionVerdict>;
+  };
+
+  return {
+    verdict: row.verdict,
+    blockingDefects: row.blocking_defects ?? [],
+    missingEvidence: row.missing_evidence ?? [],
+    criterionVerdicts: row.criterion_verdicts ?? {},
+  };
+}
+
 export async function recordApproval(input: {
   taskId: string;
   approver: string;
@@ -299,14 +373,68 @@ export async function requiredApprovalsRecorded(taskId: string, requiredRoles: s
 }
 
 export async function getReworkAttemptCount(taskId: string): Promise<number> {
-  const { count, error } = await db
+  const { data: latestApproval, error: approvalError } = await db
+    .from("artifacts")
+    .select("created_at")
+    .eq("task_id", taskId)
+    .eq("artifact_type", "approved_contract")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  assertNoError(approvalError, `Failed to load latest approved contract for ${taskId}`);
+
+  let query = db
     .from("agent_runs")
     .select("*", { count: "exact", head: true })
     .eq("task_id", taskId)
-    .eq("worker_type", "rework-cell");
+    .eq("worker_type", WORKER_TYPE_REWORK);
+
+  const approvedAt = (latestApproval as { created_at?: string } | null)?.created_at;
+  if (approvedAt) {
+    query = query.gte("started_at", approvedAt);
+  }
+
+  const { count, error } = await query;
 
   assertNoError(error, `Failed to count rework attempts for ${taskId}`);
   return count ?? 0;
+}
+
+export interface RecordDecisionInput {
+  taskId: string | null;
+  title: string;
+  decision: string;
+  rationale: string;
+  madeBy: string;
+}
+
+export async function recordDecision(input: RecordDecisionInput): Promise<string> {
+  const { data, error } = await db
+    .from("decision_records")
+    .insert({
+      task_id: input.taskId,
+      title: input.title,
+      decision: input.decision,
+      rationale: input.rationale,
+      made_by: input.madeBy,
+    })
+    .select("id")
+    .single();
+
+  assertNoError(error, `Failed to record decision "${input.title}"`);
+  return (data as { id: string }).id;
+}
+
+export async function findDecisionByTitle(title: string): Promise<{ id: string } | null> {
+  const { data, error } = await db
+    .from("decision_records")
+    .select("id")
+    .eq("title", title)
+    .maybeSingle();
+
+  assertNoError(error, `Failed to look up decision "${title}"`);
+  return data as { id: string } | null;
 }
 
 export async function dependenciesComplete(taskId: string): Promise<boolean> {

@@ -51,6 +51,9 @@ function validateFile(filePath: string, expectedTaskId: string): void {
 
     if (strictMode && !fileHasErrors) {
       const execResult = validateContractExecutability(contract, { requireCommandAc: true });
+      for (const warn of execResult.warnings) {
+        console.warn(`[WARN] ${filePath}: ${warn}`);
+      }
       if (!execResult.ok) {
         console.error(`[FAIL] ${filePath}: executability validation failed`);
         for (const err of execResult.errors) {

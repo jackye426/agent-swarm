@@ -19,12 +19,72 @@
    - `npm run typecheck`
    - `npm run validate`
    - `npm test`
-6. Check the runtime connection:
+6. **Deep healthcheck** (mandatory before scheduler/intake):
    - `npm run healthcheck`
+   - Probes: Supabase tables/queues, OpenRouter API key (surfaces 401/402), Claude Code CLI, git, writable worktree root
+   - Conditional: GitHub (`GITHUB_TOKEN` or `GITHUB_CREATE_PR=true`), Postgres checkpoint (`DATABASE_URL`), Telegram bot (`TELEGRAM_BOT_TOKEN`)
+   - `npm run healthcheck -- --json` for machine-readable output
+   - `npm run healthcheck -- --strict` when starting intake (fails on missing `TELEGRAM_CHAT_ID` / `GITHUB_WEBHOOK_SECRET`)
 7. Start the scheduler:
-   - `npm run scheduler`
-8. Enqueue jobs:
+   - `npm run scheduler` (manual) — or supervised via pm2, see below
+8. Start intake (Line 2, separate process):
+   - `npm run intake` (manual) — or supervised via pm2, see below
+9. Enqueue jobs (manual path):
    - `npm run enqueue -- task.plan.requested ./payload.json`
+
+## 24/7 Supervised Operation (pm2)
+
+For unattended operation, run all three services under pm2 instead of bare `npm run`:
+
+```powershell
+npm install -g pm2 pm2-windows-startup
+pm2 install pm2-logrotate          # bounded log files
+
+pm2 start ecosystem.config.cjs     # scheduler + intake + watchdog
+pm2 save                           # snapshot the process list
+pm2-startup install                # resurrect on Windows boot
+```
+
+How the pieces fit:
+
+- **Healthcheck gate:** scheduler and intake launch through `scripts/start-gated.ts`,
+  which runs the deep healthcheck first (strict for intake) and exits 1 on failure.
+  pm2's exponential backoff keeps retrying until credentials are fixed — nothing
+  half-starts unhealthy.
+- **Graceful shutdown:** both services handle SIGINT/SIGTERM. The scheduler
+  finishes its in-flight job before exiting (pm2 `kill_timeout` 30 s); a hard
+  crash is still safe because the unacked queue message reappears after the
+  visibility timeout.
+- **Watchdog (`npm run watchdog`):** every `WATCHDOG_INTERVAL_MS` checks
+  Supabase/OpenRouter health, stuck tasks (`PLANNING`/`IN_PROGRESS`/`VERIFYING`
+  older than `WATCHDOG_STUCK_TASK_MS`), credit/network failures in recent
+  `agent_run_failed` events, queue depth, and free disk. Alerts go to Telegram,
+  deduped to re-alert at most every `WATCHDOG_REALERT_MS`.
+- **Dead-man's switch:** set `HEALTHCHECKS_PING_URL` to a free
+  [healthchecks.io](https://healthchecks.io) check. The watchdog pings it each
+  cycle; if the host dies (power, sleep, forced reboot), the missed ping raises
+  an alert from outside the machine. Set the check's period to
+  `WATCHDOG_INTERVAL_MS` with a few minutes' grace.
+
+Day-to-day:
+
+```powershell
+pm2 status                         # process health at a glance
+pm2 logs taskgraph-scheduler       # follow a service's logs (./logs/*.log)
+pm2 restart taskgraph-intake       # bounce one service
+pm2 stop all                       # planned maintenance
+npm run watchdog:once              # manual one-shot check cycle
+npm run verify:phase3-4            # re-run Phase 3–4 automated checks
+```
+
+Boot persistence (once, **Administrator** PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/setup-pm2-windows.ps1
+```
+
+Host settings for 24/7: disable sleep/hibernate, and set Windows Update active
+hours so forced reboots land when a `pm2 save` + startup hook can recover.
 
 ## Queue Payloads
 

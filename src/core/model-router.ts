@@ -40,8 +40,30 @@ const defaultModels: Record<ModelRole, string> = {
   verification: "openai/gpt-5.5",
 };
 
+const roleMaxTokensEnv: Record<ModelRole, string> = {
+  planning_a: "MODEL_PLANNING_A_MAX_TOKENS",
+  planning_b: "MODEL_PLANNING_B_MAX_TOKENS",
+  planning_a_review: "MODEL_PLANNING_A_REVIEW_MAX_TOKENS",
+  planning_b_review: "MODEL_PLANNING_B_REVIEW_MAX_TOKENS",
+  planning_consensus: "MODEL_PLANNING_CONSENSUS_MAX_TOKENS",
+  contract_draft: "MODEL_CONTRACT_DRAFT_MAX_TOKENS",
+  contract_revision: "MODEL_CONTRACT_REVISION_MAX_TOKENS",
+  engineering_plan: "MODEL_ENGINEERING_PLAN_MAX_TOKENS",
+  verification: "MODEL_VERIFICATION_MAX_TOKENS",
+};
+
 export function modelForRole(role: ModelRole): string {
   return process.env[roleEnv[role]] || defaultModels[role];
+}
+
+export function maxTokensForRole(role: ModelRole): number | undefined {
+  const configured = process.env[roleMaxTokensEnv[role]] ?? process.env.MODEL_MAX_TOKENS;
+  if (configured) {
+    const parsed = Number.parseInt(configured, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  if (role === "verification") return 8192;
+  return undefined;
 }
 
 export async function invokeRoleModel(
@@ -66,6 +88,7 @@ export async function invokeRoleModel(
       model: modelForRole(role),
       messages,
       temperature: options.temperature ?? 0.2,
+      max_tokens: maxTokensForRole(role),
       response_format: options.responseFormat ? { type: options.responseFormat } : undefined,
     }),
   });

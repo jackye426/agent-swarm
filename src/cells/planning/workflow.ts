@@ -36,6 +36,8 @@ import {
 
 } from "../../db/records.js";
 
+import { enqueue } from "../../db/queue.js";
+
 import { transitionTaskStatus } from "../../db/tasks.js";
 
 
@@ -718,6 +720,8 @@ async function finalizeAutoApproval(state: S, contract: TaskContract): Promise<P
 
       message: "Draft contract auto-approved by planning cell after multi-agent review and executability validation.",
 
+      executability_warnings: executability.warnings,
+
       agent_run_id: state.agentRunId,
 
       notified_at: new Date().toISOString(),
@@ -789,6 +793,15 @@ async function finalizeAutoApproval(state: S, contract: TaskContract): Promise<P
 
 
   console.log(`[Planning Cell] Contract auto-approved for ${state.taskId}: ${contract.title}`);
+
+  if (process.env.TASKGRAPH_AUTO_ENQUEUE_EXECUTION === "true") {
+    await enqueue({
+      job_type: "task.execution.requested",
+      task_id: state.taskId,
+      payload: { task_id: state.taskId },
+    });
+    console.log(`[Planning Cell] Auto-enqueued execution for ${state.taskId}`);
+  }
 
   return { draftContract: contract };
 

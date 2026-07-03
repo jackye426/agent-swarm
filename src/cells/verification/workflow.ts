@@ -1,8 +1,13 @@
 import { StateGraph, Annotation } from "@langchain/langgraph";
 import type { CriterionVerdict, EvidenceRecord, TaskContract, TaskVerdict } from "../../core/types.js";
-import { deriveTaskVerdict, findMissingEvidence } from "../../core/verification.js";
+import {
+  computeEffectiveMissingEvidence,
+  deriveTaskVerdict,
+  findMissingEvidence,
+} from "../../core/verification.js";
 import { classifyVerificationMethod } from "../../core/contract-executability.js";
 import { invokeRoleModel } from "../../core/model-router.js";
+import { readKnowledgeExcerpt } from "../../core/knowledge-excerpt.js";
 import {
   getReworkAttemptCount,
   recordArtifact,
@@ -69,6 +74,12 @@ async function runModelReview(state: S): Promise<Partial<S>> {
   const scopeIn = state.contract.scope.in.map((s) => `- ${s}`).join("\n");
   const scopeOut = state.contract.scope.out.map((s) => `- ${s}`).join("\n");
 
+  // Source: system-knowledge/concepts/evidence-and-verification.md#verifier-judging-rules (v1)
+  const judgingRules = readKnowledgeExcerpt(
+    "concepts/evidence-and-verification.md",
+    "Verifier judging rules",
+  );
+
   const content = await invokeRoleModel("verification", [
     {
       role: "system",
@@ -76,11 +87,7 @@ async function runModelReview(state: S): Promise<Partial<S>> {
 Return only JSON with: {"criterion_verdicts":{"AC-1":"PASS"},"blocking_defects":[],"regression_risks":[]}.
 Use PASS, FAIL, INCONCLUSIVE, or NOT_APPLICABLE for every acceptance criterion.
 
-Judging rules:
-- command verification: use CI output and ci_run evidence
-- diff_inspection verification: judge primarily from the PR diff; do not require CI alone
-- human verification: PASS only if explicit human evidence exists; otherwise INCONCLUSIVE or NOT_APPLICABLE
-- Flag scope violations if changed files appear to touch scope.out areas`,
+${judgingRules}`,
     },
     {
       role: "user",
@@ -151,6 +158,16 @@ async function mapEvidenceToCriteria(state: S): Promise<Partial<S>> {
   }
 
   return { criterionVerdicts: verdicts };
+}
+
+async function reconcileMissingEvidence(state: S): Promise<Partial<S>> {
+  return {
+    missingEvidence: computeEffectiveMissingEvidence(
+      state.contract,
+      state.evidenceRecords,
+      state.criterionVerdicts,
+    ),
+  };
 }
 
 async function deriveVerdict(state: S): Promise<Partial<S>> {
@@ -229,7 +246,19 @@ async function publishVerificationRecord(state: S): Promise<Partial<S>> {
     );
   }
 
-  if (effectiveVerdict === "REWORK_REQUIRED" && transitioned) {
+  if (effectiveVerdict === "COMPLETE" && transitioned) {
+    await recordArtifact({
+      taskId: state.taskId,
+      artifactType: "human_notification",
+      content: {
+        type: "task_complete",
+        task_id: state.taskId,
+        message: `${state.taskId} verification passed. All acceptance criteria satisfied.`,
+        agent_run_id: state.agentRunId,
+        notified_at: new Date().toISOString(),
+      },
+    });
+  } else if (effectiveVerdict === "REWORK_REQUIRED" && transitioned) {
     // Auto re-enqueue engineering with defect context. The scheduler handler will
     // transition REWORK_REQUIRED → IN_PROGRESS and re-run the engineering cell.
     await enqueue({
@@ -267,12 +296,21 @@ function hasError(state: S): "error" | "continue" {
 }
 
 async function handleError(state: S): Promise<Partial<S>> {
-  await recordArtifact({
-    taskId: state.taskId,
-    artifactType: "verification_error",
-    content: { agent_run_id: state.agentRunId, error: state.error },
-  });
   console.error(`[Verification Cell] Error in ${state.taskId}: ${state.error}`);
+
+  try {
+    await recordArtifact({
+      taskId: state.taskId,
+      artifactType: "verification_error",
+      content: { agent_run_id: state.agentRunId, error: state.error },
+    });
+  } catch (err) {
+    console.error(
+      `[Verification Cell] Could not persist verification_error for ${state.taskId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+
   return {};
 }
 
@@ -280,6 +318,7 @@ const graph = new StateGraph(VerificationState)
   .addNode("readContractAndEvidence", readContractAndEvidence)
   .addNode("runModelReview", runModelReview)
   .addNode("mapEvidenceToCriteria", mapEvidenceToCriteria)
+  .addNode("reconcileMissingEvidence", reconcileMissingEvidence)
   .addNode("deriveVerdict", deriveVerdict)
   .addNode("publishVerificationRecord", publishVerificationRecord)
   .addNode("handleError", handleError)
@@ -289,7 +328,8 @@ const graph = new StateGraph(VerificationState)
     error: "mapEvidenceToCriteria",
     continue: "mapEvidenceToCriteria",
   })
-  .addEdge("mapEvidenceToCriteria", "deriveVerdict")
+  .addEdge("mapEvidenceToCriteria", "reconcileMissingEvidence")
+  .addEdge("reconcileMissingEvidence", "deriveVerdict")
   .addEdge("deriveVerdict", "publishVerificationRecord")
   .addConditionalEdges("publishVerificationRecord", hasError, {
     error: "handleError",

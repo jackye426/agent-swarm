@@ -1,4 +1,5 @@
 import { Bot } from "grammy";
+import { sendTelegramMessage } from "../core/notify.js";
 import { db } from "../db/client.js";
 import { setChatRepoBinding, getChatRepoBinding } from "../db/records.js";
 import { parseRepoFullName } from "../core/repo.js";
@@ -8,6 +9,7 @@ import {
   resolveRepoForIntake,
 } from "./repo-resolver.js";
 import { createAndEnqueueTask } from "./task-creator.js";
+import { formatIntakeUserContext } from "./intake-context.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -21,7 +23,12 @@ export const bot = new Bot(token);
 const pendingRepoPrompts = new Map<string, { goal: string }>();
 
 export async function sendNotification(text: string): Promise<void> {
-  await bot.api.sendMessage(chatId!, text, { parse_mode: "Markdown" });
+  // Shared fetch-based sender (also used by the watchdog) — same Bot API call
+  // grammy would make, without coupling notification delivery to the bot instance.
+  const result = await sendTelegramMessage(text);
+  if (!result.ok) {
+    throw new Error(`Telegram notification failed: ${result.message}`);
+  }
 }
 
 async function createTaskFromTelegram(
@@ -40,7 +47,7 @@ async function createTaskFromTelegram(
     await reply("Creating task…");
     const { taskId, repoFullName } = await createAndEnqueueTask({
       goal,
-      context: "Task created via Telegram bot.",
+      context: formatIntakeUserContext("telegram"),
       sourceLabel: "telegram",
       sourceKind: "telegram",
       repo,

@@ -10,17 +10,27 @@ import {
   primaryAcKind,
 } from "../../core/contract-executability.js";
 import { invokeRoleModel } from "../../core/model-router.js";
-import { getTaskRepo, recordArtifact, recordEvidence } from "../../db/records.js";
+import {
+  getLatestEngineeringWorktree,
+  getTaskRepo,
+  recordArtifact,
+  recordEvidence,
+} from "../../db/records.js";
 import { parseGitHubRemoteUrl } from "../../core/repo.js";
 import { transitionTaskStatus } from "../../db/tasks.js";
 import {
   hasStagedChanges,
   lastCommitHasExcludedPaths,
+  lastCommitHasScopeOutPaths,
   removeExcludedFilesFromDisk,
+  restoreScopeOutFilesBeforeCommit,
   stageAllExceptExcluded,
   undoLastCommitKeepingChanges,
+  unstageExcludedPaths,
 } from "./commit-staging.js";
-import { writeWorktreeSupportFiles } from "./worktree-support.js";
+import { scrubHarnessLinesFromGitignore, writeWorktreeSupportFiles } from "./worktree-support.js";
+import { fileMatchesScopeOutItem } from "./commit-guard.js";
+import { readKnowledgeExcerpt } from "../../core/knowledge-excerpt.js";
 
 const EngineeringState = Annotation.Root({
   taskId: Annotation<string>(),
@@ -33,6 +43,8 @@ const EngineeringState = Annotation.Root({
   worktreePath: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
   branchName: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
   repoHasHead: Annotation<boolean>({ default: () => true, reducer: (_, v) => v }),
+  baseSha: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
+  preserveWorktreeBase: Annotation<boolean>({ default: () => false, reducer: (_, v) => v }),
   commitSha: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
   implementationPlan: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
   implementationReport: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
@@ -45,6 +57,17 @@ const EngineeringState = Annotation.Root({
 });
 
 type S = typeof EngineeringState.State;
+
+async function resolveHeadSha(worktreePath: string): Promise<string | null> {
+  const result = await runCommand("git", ["rev-parse", "--verify", "HEAD"], { cwd: worktreePath });
+  return result.exitCode === 0 && result.stdout.trim() ? result.stdout.trim() : null;
+}
+
+async function resolveBranchBaseSha(worktreePath: string, branchName: string): Promise<string | null> {
+  const mergeBase = await runCommand("git", ["merge-base", "HEAD", branchName], { cwd: worktreePath });
+  if (mergeBase.exitCode === 0 && mergeBase.stdout.trim()) return mergeBase.stdout.trim();
+  return resolveHeadSha(worktreePath);
+}
 
 async function resolveRepoRoot(state: S): Promise<Partial<S>> {
   const taskRepo = await getTaskRepo(state.taskId);
@@ -79,14 +102,39 @@ async function resolveRepoRoot(state: S): Promise<Partial<S>> {
     const fetch = await runCommand("git", ["fetch", "--depth", "50", "origin"], { cwd: cloneDir, timeoutMs: 120_000 });
     if (fetch.exitCode !== 0) {
       const hasHead = await runCommand("git", ["rev-parse", "--verify", "HEAD"], { cwd: cloneDir });
+      const fetchOut = (fetch.stderr || fetch.stdout).toLowerCase();
       if (hasHead.exitCode !== 0) {
         // Empty repositories have no HEAD to fetch/reset yet. Use the clone as
         // the initial worktree and let createWorktree create an orphan branch.
         return { repoRoot: cloneDir, repoHasHead: false };
       }
-      if ((fetch.stderr || fetch.stdout).includes("couldn't find remote ref HEAD")) {
+      if (fetchOut.includes("couldn't find remote ref head")) {
         // Remote is still empty, but the local clone may have an in-progress
         // task branch from an earlier attempt. Continue from local state.
+        return { repoRoot: cloneDir, repoHasHead: true };
+      }
+      if (
+        fetchOut.includes("could not connect") ||
+        fetchOut.includes("failed to connect") ||
+        fetchOut.includes("unable to access") ||
+        fetchOut.includes("connection timed out") ||
+        fetchOut.includes("timed out") ||
+        fetchOut.includes("econnreset") ||
+        fetchOut.includes("network")
+      ) {
+        const currentBranch = await runCommand("git", ["branch", "--show-current"], { cwd: cloneDir });
+        const branch = currentBranch.stdout.trim();
+        const expectedTaskBranch = `taskgraph/${state.taskId.toLowerCase()}`;
+        if (branch.startsWith("taskgraph/") && branch !== expectedTaskBranch) {
+          return {
+            error:
+              `Failed to fetch ${taskRepo.repoFullName}, and local clone is on ${branch}. ` +
+              `Refusing to start ${state.taskId} from another task branch without a refreshed base.`,
+          };
+        }
+        console.warn(
+          `[Engineering Cell] git fetch failed for ${taskRepo.repoFullName}; continuing with local clone`,
+        );
         return { repoRoot: cloneDir, repoHasHead: true };
       }
       return { error: `Failed to fetch ${taskRepo.repoFullName}: ${fetch.stderr || fetch.stdout}` };
@@ -136,9 +184,15 @@ async function createWorktree(state: S): Promise<Partial<S>> {
 
   const storageRoot = process.env.TASKGRAPH_WORKTREE_ROOT ?? path.join(os.tmpdir(), "taskgraph-os");
   const branchName = `taskgraph/${state.taskId.toLowerCase()}`;
+  const priorWorktree = await getLatestEngineeringWorktree(state.taskId);
+  const preservePriorBase = state.preserveWorktreeBase && priorWorktree !== null;
 
   const currentBranch = await runCommand("git", ["branch", "--show-current"], { cwd: state.repoRoot });
   if (currentBranch.stdout.trim() === branchName) {
+    const baseSha = preservePriorBase
+      ? priorWorktree.baseSha ?? null
+      : await resolveBranchBaseSha(state.repoRoot, branchName);
+    const headSha = await resolveHeadSha(state.repoRoot);
     await writeWorktreeSupportFiles(state.repoRoot, state.taskId, state.contract);
     await recordArtifact({
       taskId: state.taskId,
@@ -147,10 +201,12 @@ async function createWorktree(state: S): Promise<Partial<S>> {
         agent_run_id: state.agentRunId,
         path: state.repoRoot,
         branch: branchName,
+        base_sha: baseSha,
+        head_sha: headSha,
         mode: "reuse_repo_root_task_branch",
       },
     });
-    return { worktreePath: state.repoRoot, branchName };
+    return { worktreePath: state.repoRoot, branchName, baseSha };
   }
 
   if (!state.repoHasHead) {
@@ -159,6 +215,7 @@ async function createWorktree(state: S): Promise<Partial<S>> {
       return { error: `Failed to create orphan branch for empty repo: ${checkout.stderr || checkout.stdout}` };
     }
     await writeWorktreeSupportFiles(state.repoRoot, state.taskId, state.contract);
+    const headSha = await resolveHeadSha(state.repoRoot);
     await recordArtifact({
       taskId: state.taskId,
       artifactType: "engineering_worktree",
@@ -166,12 +223,17 @@ async function createWorktree(state: S): Promise<Partial<S>> {
         agent_run_id: state.agentRunId,
         path: state.repoRoot,
         branch: branchName,
+        base_sha: null,
+        head_sha: headSha,
         mode: "empty_repo_orphan_branch",
       },
     });
-    return { worktreePath: state.repoRoot, branchName };
+    return { worktreePath: state.repoRoot, branchName, baseSha: null };
   }
 
+  const baseSha = preservePriorBase
+    ? priorWorktree.baseSha ?? null
+    : await resolveHeadSha(state.repoRoot);
   const worktreePath = path.join(storageRoot, state.taskId);
   // git outputs forward-slash paths on all platforms; normalize for comparison
   const worktreePathUnix = worktreePath.replace(/\\/g, "/");
@@ -189,16 +251,28 @@ async function createWorktree(state: S): Promise<Partial<S>> {
         return { error: `Failed to create git worktree: ${result.stderr || result.stdout}` };
       }
     }
+  } else if (!preservePriorBase && baseSha) {
+    const reset = await runCommand("git", ["reset", "--hard", baseSha], { cwd: worktreePath });
+    if (reset.exitCode !== 0) {
+      return { error: `Failed to reset existing worktree to clean base ${baseSha}: ${reset.stderr || reset.stdout}` };
+    }
   }
 
   await writeWorktreeSupportFiles(worktreePath, state.taskId, state.contract);
+  const headSha = await resolveHeadSha(worktreePath);
 
   await recordArtifact({
     taskId: state.taskId,
     artifactType: "engineering_worktree",
-    content: { agent_run_id: state.agentRunId, path: worktreePath, branch: branchName },
+    content: {
+      agent_run_id: state.agentRunId,
+      path: worktreePath,
+      branch: branchName,
+      base_sha: baseSha,
+      head_sha: headSha,
+    },
   });
-  return { worktreePath, branchName };
+  return { worktreePath, branchName, baseSha };
 }
 
 async function installDependencies(state: S): Promise<Partial<S>> {
@@ -325,13 +399,22 @@ async function invokeClaudeCode(state: S): Promise<Partial<S>> {
     // Wrap the plan in an authorization header so Claude Code doesn't stop at
     // any approval-gate language in the contract — the task is already IN_PROGRESS,
     // meaning all human approvals have been recorded.
+    // Source: system-knowledge/policies/agent-permissions.md#scope-enforcement-prompt-excerpt (v1)
+    const scopeRules = readKnowledgeExcerpt(
+      "policies/agent-permissions.md",
+      "### Scope enforcement (prompt excerpt)",
+    );
+    const scopeOutList = state.contract.scope.out.map((s) => `- ${s}`).join("\n") || "(none listed)";
+
     const authorizedPrompt = [
       `AUTHORIZATION: This task (${state.taskId}) is approved and IN_PROGRESS.`,
       `All human approvals have been recorded. Proceed directly with implementation.`,
       `Do not stop to ask for approval — implement all changes described below now.`,
-      `Do not modify tasks/${state.taskId}/contract.yaml.`,
-      `Do not create or commit .taskgraph* files.`,
-      `Do not run git commit — the engineering cell commits your changes.\n`,
+      scopeRules.replace("{taskId}", state.taskId),
+      ``,
+      `Contract scope.out (do not modify these areas):`,
+      scopeOutList,
+      ``,
       state.implementationPlan,
     ].join("\n");
 
@@ -339,8 +422,8 @@ async function invokeClaudeCode(state: S): Promise<Partial<S>> {
     await writeFile(planFile, authorizedPrompt, "utf8");
 
     const shellCmd = process.platform === "win32"
-      ? `${workerCommand} --print (Get-Content '${planFile.replace(/'/g, "''")}' -Raw) --dangerously-skip-permissions`
-      : `${workerCommand} --print "$(cat '${planFile.replace(/'/g, "'\\''")}')" --dangerously-skip-permissions`;
+      ? `Get-Content -LiteralPath '${planFile.replace(/'/g, "''")}' -Raw | & ${workerCommand} --print --dangerously-skip-permissions`
+      : `cat '${planFile.replace(/'/g, "'\\''")}' | ${workerCommand} --print --dangerously-skip-permissions`;
 
     result = await runShellCommand(shellCmd, { cwd: state.worktreePath, timeoutMs });
   }
@@ -448,17 +531,6 @@ async function runTests(state: S): Promise<Partial<S>> {
   return { ciOutput, testResults: results, commitSha };
 }
 
-function fileMatchesScopeOutItem(filePath: string, scopeOutItem: string): boolean {
-  const file = filePath.toLowerCase().replace(/\\/g, "/");
-  const item = scopeOutItem.toLowerCase();
-  if (!item.includes("/") && !item.includes("*") && !item.includes(".")) {
-    return false;
-  }
-  const prefix = item.replace(/\*\*/g, "").replace(/\*/g, "").replace(/\/$/, "").trim();
-  if (!prefix) return false;
-  return file.startsWith(prefix) || file.includes(`/${prefix}`) || file.includes(prefix);
-}
-
 async function listChangedFiles(worktreePath: string): Promise<string[]> {
   const againstParent = await runCommand("git", ["diff", "--name-only", "HEAD~1", "HEAD"], {
     cwd: worktreePath,
@@ -519,12 +591,17 @@ async function commitChanges(state: S): Promise<Partial<S>> {
   if (!state.worktreePath) return { error: "Cannot commit without a worktree path" };
 
   const { worktreePath, taskId } = state;
+  await scrubHarnessLinesFromGitignore(worktreePath, taskId);
   await removeExcludedFilesFromDisk(worktreePath, taskId);
 
   const status = await runCommand("git", ["status", "--porcelain"], { cwd: worktreePath });
   if (status.stdout.trim() === "") {
     if (await lastCommitHasExcludedPaths(worktreePath, taskId)) {
       await undoLastCommitKeepingChanges(worktreePath);
+    } else if (await lastCommitHasScopeOutPaths(worktreePath, state.contract.scope.out)) {
+      await undoLastCommitKeepingChanges(worktreePath);
+      await scrubHarnessLinesFromGitignore(worktreePath, taskId);
+      await restoreScopeOutFilesBeforeCommit(worktreePath, state.contract.scope.out, state.baseSha);
     } else {
       const sha = await runCommand("git", ["rev-parse", "HEAD"], { cwd: worktreePath });
       const commitSha = sha.exitCode === 0 ? sha.stdout.trim() : state.commitSha ?? null;
@@ -533,6 +610,8 @@ async function commitChanges(state: S): Promise<Partial<S>> {
   }
 
   await stageAllExceptExcluded(worktreePath, taskId);
+  await restoreScopeOutFilesBeforeCommit(worktreePath, state.contract.scope.out, state.baseSha);
+  await unstageExcludedPaths(worktreePath, taskId);
 
   if (!(await hasStagedChanges(worktreePath))) {
     const sha = await runCommand("git", ["rev-parse", "HEAD"], { cwd: worktreePath });
@@ -558,6 +637,18 @@ async function commitChanges(state: S): Promise<Partial<S>> {
 
   const sha = await runCommand("git", ["rev-parse", "HEAD"], { cwd: worktreePath });
   const commitSha = sha.exitCode === 0 ? sha.stdout.trim() : null;
+  await recordArtifact({
+    taskId,
+    artifactType: "engineering_worktree",
+    content: {
+      agent_run_id: state.agentRunId,
+      path: worktreePath,
+      branch: state.branchName,
+      base_sha: state.baseSha,
+      head_sha: commitSha,
+      mode: "post_commit",
+    },
+  });
   return applyScopeCheckResult(state, commitSha);
 }
 
@@ -688,15 +779,22 @@ function hasError(state: S): "error" | "continue" {
 }
 
 async function handleError(state: S): Promise<Partial<S>> {
-  await recordArtifact({
-    taskId: state.taskId,
-    artifactType: "engineering_error",
-    content: { agent_run_id: state.agentRunId, error: state.error },
-  });
   console.error(`[Engineering Cell] Error in ${state.taskId}: ${state.error}`);
 
+  try {
+    await recordArtifact({
+      taskId: state.taskId,
+      artifactType: "engineering_error",
+      content: { agent_run_id: state.agentRunId, error: state.error },
+    });
+  } catch (err) {
+    console.error(
+      `[Engineering Cell] Could not persist engineering_error for ${state.taskId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+
   // Transition to BLOCKED so the task doesn't stay stuck at IN_PROGRESS.
-  // Wrap in try/catch — transition may already have happened or task may be in a terminal state.
   try {
     await transitionTaskStatus({
       taskId: state.taskId,

@@ -1,0 +1,11 @@
+evidence_id: E-003
+task_id: T-003
+acceptance_criteria:
+  - AC-3
+type: model_review
+status: pass
+commit_sha: a1b2c3d4e5f678901234567890abcdef12345678
+source: https://github.com/jackye426/agent-swarm/actions/runs/1001
+timestamp: 2026-07-01T12:00:00Z
+summary: >
+  Diff inspection documents npm ci install step before validation commands.

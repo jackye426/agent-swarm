@@ -9,13 +9,14 @@ import {
 import { assertComplete, assertTransition, canTransition } from "../src/core/state-machine.js";
 import { physicalQueueName } from "../src/core/queue-names.js";
 import { deriveTaskVerdict, findMissingEvidence } from "../src/core/verification.js";
-import { modelForRole } from "../src/core/model-router.js";
+import { maxTokensForRole, modelForRole } from "../src/core/model-router.js";
 import {
   classifyVerificationMethod,
   primaryAcKind,
   validateContractExecutability,
   resolveTestCommandsFromPacket,
   formatContextForEngineering,
+  formatCompactContextForReview,
 } from "../src/core/contract-executability.js";
 
 const contract = TaskContractSchema.parse({
@@ -205,7 +206,7 @@ test("executability accepts diff-inspection criteria (T-003 style)", () => {
   assert.equal(primaryAcKind(result.acClassifications["AC-1"]!), "diff_inspection");
 });
 
-test("executability flags command mismatch against seed test commands", () => {
+test("executability warns on command mismatch against seed test commands", () => {
   const cmdContract = {
     ...contract,
     acceptance_criteria: [
@@ -219,8 +220,9 @@ test("executability flags command mismatch against seed test commands", () => {
   const result = validateContractExecutability(cmdContract, {
     testCommands: ["npm test"],
   });
-  assert.equal(result.ok, false);
-  assert.ok(result.errors.some((e) => e.includes("custom:check")));
+  assert.equal(result.ok, true);
+  assert.ok(result.warnings.some((w) => w.includes("custom:check")));
+  assert.equal(result.errors.length, 0);
 });
 
 test("resolveTestCommandsFromPacket prefers payload then packet then seed", () => {
@@ -260,6 +262,43 @@ test("formatContextForEngineering uses planning_context when present", () => {
   assert.match(formatted, /User goal context/);
 });
 
+test("formatCompactContextForReview keeps goal, test commands, and README under budget", () => {
+  const fileTree = Array.from({ length: 120 }, (_, i) => `file-${i}.ts`).join("\n");
+  const readme = "A".repeat(2_000);
+  const planningContext = [
+    "Add negative-path healthcheck test.",
+    "",
+    "--- Seed repo context ---",
+    "Repository: owner/repo",
+    "",
+    "File tree (top levels):",
+    fileTree,
+    "",
+    "README excerpt:",
+    readme,
+    "",
+    "Package manifest (package.json):",
+    '{"name":"repo"}',
+    "",
+    "Detected test commands:",
+    "- npm test",
+    "- npm run test:negative",
+    "",
+    "Recent commits:",
+    "- abc123 initial",
+  ].join("\n");
+
+  const compact = formatCompactContextForReview(planningContext, 3_000);
+  assert.match(compact, /Add negative-path healthcheck test/);
+  assert.match(compact, /npm test/);
+  assert.match(compact, /README excerpt:/);
+  assert.ok(compact.length <= 3_050);
+  assert.ok(!compact.includes("Recent commits:"));
+  assert.ok(!compact.includes("Package manifest"));
+  const treeLines = compact.split("\n").filter((line) => line.startsWith("file-"));
+  assert.ok(treeLines.length <= 80);
+});
+
 test("model router resolves role-specific model overrides", () => {
   const previous = process.env.MODEL_VERIFICATION;
   process.env.MODEL_VERIFICATION = "openai/test-verifier";
@@ -271,6 +310,19 @@ test("model router resolves role-specific model overrides", () => {
       delete process.env.MODEL_VERIFICATION;
     } else {
       process.env.MODEL_VERIFICATION = previous;
+    }
+  }
+});
+
+test("model router caps verification max tokens by default", () => {
+  const previous = process.env.MODEL_VERIFICATION_MAX_TOKENS;
+  delete process.env.MODEL_VERIFICATION_MAX_TOKENS;
+
+  try {
+    assert.equal(maxTokensForRole("verification"), 8192);
+  } finally {
+    if (previous !== undefined) {
+      process.env.MODEL_VERIFICATION_MAX_TOKENS = previous;
     }
   }
 });
