@@ -22,13 +22,32 @@ export async function sendTelegramMessage(text: string): Promise<NotifyResult> {
     return { ok: false, message: "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not configured" };
   }
 
-  try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  const send = async (parseMode?: "Markdown"): Promise<Response> =>
+    fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        ...(parseMode ? { parse_mode: parseMode } : {}),
+      }),
       signal: AbortSignal.timeout(15_000),
     });
+
+  try {
+    let response = await send("Markdown");
+
+    if (response.status === 400) {
+      // Legacy Markdown treats any lone `_` or `*` as an unclosed entity —
+      // task statuses (IN_PROGRESS), queue names, and env vars all trip it.
+      // Delivery beats formatting: retry as plain text.
+      const body = (await response.text()).slice(0, 200);
+      if (/can't parse entities/i.test(body)) {
+        response = await send();
+      } else {
+        return { ok: false, message: `Telegram sendMessage returned 400: ${body}` };
+      }
+    }
 
     if (!response.ok) {
       const body = (await response.text()).slice(0, 200);

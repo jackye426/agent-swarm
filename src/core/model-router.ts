@@ -9,7 +9,8 @@ export type ModelRole =
   | "contract_draft"
   | "contract_revision"
   | "engineering_plan"
-  | "verification";
+  | "verification"
+  | "intake_conversation";
 
 export interface RoleMessage {
   role: "system" | "user" | "assistant";
@@ -26,6 +27,7 @@ const roleEnv: Record<ModelRole, string> = {
   contract_revision: "MODEL_CONTRACT_REVISION",
   engineering_plan: "MODEL_ENGINEERING_PLAN",
   verification: "MODEL_VERIFICATION",
+  intake_conversation: "MODEL_INTAKE_CONVERSATION",
 };
 
 const defaultModels: Record<ModelRole, string> = {
@@ -38,6 +40,7 @@ const defaultModels: Record<ModelRole, string> = {
   contract_revision: "anthropic/claude-opus-4.8",
   engineering_plan: "anthropic/claude-opus-4.8",
   verification: "openai/gpt-5.5",
+  intake_conversation: "anthropic/claude-opus-4.8",
 };
 
 const roleMaxTokensEnv: Record<ModelRole, string> = {
@@ -50,6 +53,7 @@ const roleMaxTokensEnv: Record<ModelRole, string> = {
   contract_revision: "MODEL_CONTRACT_REVISION_MAX_TOKENS",
   engineering_plan: "MODEL_ENGINEERING_PLAN_MAX_TOKENS",
   verification: "MODEL_VERIFICATION_MAX_TOKENS",
+  intake_conversation: "MODEL_INTAKE_CONVERSATION_MAX_TOKENS",
 };
 
 export function modelForRole(role: ModelRole): string {

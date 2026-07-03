@@ -124,9 +124,13 @@ async function checkDiskFree(): Promise<WatchdogAlert[]> {
 
 async function pingDeadMansSwitch(): Promise<void> {
   const url = process.env.HEALTHCHECKS_PING_URL?.trim();
-  if (!url) return;
+  if (!url) {
+    console.warn("[Watchdog] Dead-man ping SKIPPED: HEALTHCHECKS_PING_URL not set in this process env");
+    return;
+  }
   try {
-    await fetch(url, { method: "GET", signal: AbortSignal.timeout(10_000) });
+    const response = await fetch(url, { method: "GET", signal: AbortSignal.timeout(10_000) });
+    console.log(`[Watchdog] Dead-man ping ${response.status} → ${url.slice(0, 40)}...`);
   } catch (err) {
     // Ping failure means healthchecks.io will alert externally — exactly its job.
     console.warn(`[Watchdog] Dead-man ping failed: ${err instanceof Error ? err.message : err}`);

@@ -1,6 +1,6 @@
 # TaskGraph OS — Project Status
 
-_Last updated: 2026-07-03 (Phases 3–4 verified; Phase 2 E2E next)_
+_Last updated: 2026-07-04 (Line 2 proven — T-010 COMPLETE via Telegram; notification delivery fixed)_
 
 ---
 
@@ -9,9 +9,9 @@ _Last updated: 2026-07-03 (Phases 3–4 verified; Phase 2 E2E next)_
 | Milestone | Status | Evidence |
 |-----------|--------|----------|
 | **Line 1** — scripted pipeline → COMPLETE on external repo | **Done** | T-008 COMPLETE on `jackye426/swarm-sandbox` |
-| **Line 2** — Telegram → COMPLETE unattended | **Not proven** | Intake + auto-dispatch ready; E2E pending |
+| **Line 2** — Telegram → COMPLETE unattended | **Proven** | T-010 `/task` → COMPLETE unattended (2026-07-03 16:00 UTC), zero manual enqueues; 2d failure-path test pending |
 | **24/7 ops stack** — pm2 + watchdog | **Verified** | `npm run verify:phase3-4` — 8 automated checks PASS (2026-07-03) |
-| **24/7 production** — soak + declaration | **Pending** | Phase 5 soak; manual: healthchecks.io URL, reboot test |
+| **24/7 production** — soak + declaration | **Soak running** | Started 2026-07-03 17:00 UTC — [`soak-2026-07.md`](system-knowledge/operations/soak-2026-07.md); Phase 6 docs written, declaration gated on 24h exit |
 
 ---
 
@@ -21,6 +21,8 @@ _Last updated: 2026-07-03 (Phases 3–4 verified; Phase 2 E2E next)_
 |-------|--------|
 | Core types, schemas, state machine | Complete |
 | Supabase migrations 001–004 | Complete |
+| Migration 005 (Realtime publication for notifications) | **Written — run in SQL editor** |
+| Notification delivery | **Complete** (Realtime + 60 s polling fallback, dedup, delivery logging, plain-text fallback) |
 | Verification evidence reconciliation | Complete (`computeEffectiveMissingEvidence`) |
 | Verification diff assembly | Complete (`assembleVerificationDiff`, cumulative rework diff) |
 | Rework → auto re-verify loop | Complete (scheduler + pipeline loop + rework context) |
@@ -29,6 +31,7 @@ _Last updated: 2026-07-03 (Phases 3–4 verified; Phase 2 E2E next)_
 | Harness hygiene | Complete (info/exclude, commit guard, scope-out restore) |
 | Supabase transport retry | Complete (`retry-fetch.ts`) |
 | Intake (Telegram + GitHub) | Code complete |
+| **Conversational intake** | **Deployed** (plain-language Telegram → clarifying Qs → confirmed task chain with dependencies; migration 006) |
 | Intake auto-dispatch | Complete (`TASKGRAPH_AUTO_ENQUEUE_*`) |
 | Shallow healthcheck | Complete (Supabase + queues + env presence) |
 | **Deep healthcheck** | **Complete + verified** (OpenRouter now probes authenticated `/api/v1/key`; bad keys rejected at startup) |

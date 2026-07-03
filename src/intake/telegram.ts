@@ -9,6 +9,7 @@ import {
   resolveRepoForIntake,
 } from "./repo-resolver.js";
 import { createAndEnqueueTask } from "./task-creator.js";
+import { clearConversation, forgetChat, handleConversationMessage } from "./conversation.js";
 import { formatIntakeUserContext } from "./intake-context.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -114,30 +115,57 @@ bot.command("repo", async (ctx) => {
   await ctx.reply("Usage:\n/repo set owner/repo\n/repo current");
 });
 
+bot.command("reset", async (ctx) => {
+  const chatIdStr = String(ctx.chat.id);
+  pendingRepoPrompts.delete(chatIdStr);
+  await clearConversation(chatIdStr);
+  await ctx.reply("Fresh start — tell me what you'd like built. (I still remember past projects; /forget wipes those too.)");
+});
+
+bot.command("forget", async (ctx) => {
+  const chatIdStr = String(ctx.chat.id);
+  pendingRepoPrompts.delete(chatIdStr);
+  await forgetChat(chatIdStr);
+  await ctx.reply("All project memory for this chat wiped. Clean slate.");
+});
+
 bot.on("message:text", async (ctx, next) => {
   const chatIdStr = String(ctx.chat.id);
-  const pending = pendingRepoPrompts.get(chatIdStr);
-  if (!pending) {
-    await next();
-    return;
-  }
-
   const text = ctx.message.text.trim();
   if (text.startsWith("/")) {
     await next();
     return;
   }
 
-  const parsed = parseRepoFullName(text);
-  if (!parsed) {
-    await ctx.reply("Please reply with a valid `owner/repo` slug.", { parse_mode: "Markdown" });
+  // A pending /task repo prompt takes priority over the conversation flow.
+  const pending = pendingRepoPrompts.get(chatIdStr);
+  if (pending) {
+    const parsed = parseRepoFullName(text);
+    if (!parsed) {
+      await ctx.reply("Please reply with a valid `owner/repo` slug.", { parse_mode: "Markdown" });
+      return;
+    }
+    pendingRepoPrompts.delete(chatIdStr);
+    await createTaskFromTelegram(chatIdStr, pending.goal, parsed, (text, markdown) =>
+      ctx.reply(text, markdown ? { parse_mode: "Markdown" } : undefined),
+    );
     return;
   }
 
-  pendingRepoPrompts.delete(chatIdStr);
-  await createTaskFromTelegram(chatIdStr, pending.goal, parsed, (text, markdown) =>
-    ctx.reply(text, markdown ? { parse_mode: "Markdown" } : undefined),
-  );
+  // Plain-language path: requirements conversation → confirmed task chain.
+  // Telegram's typing indicator auto-clears after ~5s, but the conversation
+  // model (plus a possible repo snapshot scan) can easily take longer —
+  // without a refresh, the indicator vanishes and the chat looks dead until
+  // the reply lands. Keep it alive on an interval for the duration of the call.
+  const typingInterval = setInterval(() => {
+    ctx.replyWithChatAction("typing").catch(() => {});
+  }, 4_000);
+  await ctx.replyWithChatAction("typing").catch(() => {});
+  try {
+    await handleConversationMessage(chatIdStr, text, (message) => ctx.reply(message));
+  } finally {
+    clearInterval(typingInterval);
+  }
 });
 
 bot.command("status", async (ctx) => {
@@ -177,11 +205,15 @@ bot.command("status", async (ctx) => {
 bot.command("start", async (ctx) => {
   await ctx.reply(
     "👋 *TaskGraph OS*\n\n" +
-      "/task <goal> [--repo owner/name] — queue a new task\n" +
+      "Just tell me what you want built, in your own words — I'll ask questions, " +
+      "propose a plan, and queue the work once you confirm.\n\n" +
+      "Power-user commands:\n" +
+      "/task <goal> [--repo owner/name] — queue a task directly\n" +
       "/repo set owner/repo — default repo for this chat\n" +
-      "/repo current — show default repo\n" +
-      "/status T-001 — check task status\n\n" +
-      "I'll message you here when tasks need attention.",
+      "/status T-001 — check task status\n" +
+      "/reset — start the conversation over (keeps project memory)\n" +
+      "/forget — wipe this chat's project memory\n\n" +
+      "I'll message you here when tasks complete or need attention.",
     { parse_mode: "Markdown" },
   );
 });

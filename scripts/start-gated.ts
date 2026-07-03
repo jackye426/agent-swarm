@@ -8,6 +8,13 @@
  * ever half-starts unhealthy. On success, imports the service entry module,
  * which starts it.
  *
+ * The healthcheck retries in-process (STARTGATE_HEALTHCHECK_ATTEMPTS every
+ * STARTGATE_RETRY_DELAY_MS) before exiting. At cold boot the network is often
+ * not up when pm2 resurrects; without the retry loop each instant failure
+ * inflates pm2's exponential backoff and the stack takes 5+ minutes to come
+ * online. A steady in-process cadence rides out warmup in seconds, while
+ * genuinely bad credentials still exhaust the attempts and land in pm2 backoff.
+ *
  * Usage: tsx scripts/start-gated.ts <scheduler|intake>
  */
 
@@ -24,6 +31,9 @@ const SERVICES = {
   intake: { entry: "../src/intake/index.js", strict: true },
 } as const;
 
+const HEALTHCHECK_ATTEMPTS = Number(process.env.STARTGATE_HEALTHCHECK_ATTEMPTS ?? 10);
+const RETRY_DELAY_MS = Number(process.env.STARTGATE_RETRY_DELAY_MS ?? 15_000);
+
 async function main(): Promise<void> {
   const name = process.argv[2] as keyof typeof SERVICES | undefined;
   if (!name || !(name in SERVICES)) {
@@ -39,18 +49,33 @@ async function main(): Promise<void> {
     db = client.db as unknown as SupabaseProbeClient;
   }
 
-  console.log(`[StartGated] Running deep healthcheck before starting ${name}...`);
-  const summary = await runHealthProbes(deps, { strict: service.strict, db });
-  console.log(formatProbeResults(summary.results, service.strict));
+  for (let attempt = 1; attempt <= HEALTHCHECK_ATTEMPTS; attempt += 1) {
+    console.log(
+      `[StartGated] Deep healthcheck for ${name} (attempt ${attempt}/${HEALTHCHECK_ATTEMPTS})...`,
+    );
+    const summary = await runHealthProbes(deps, { strict: service.strict, db });
+    console.log(formatProbeResults(summary.results, service.strict));
 
-  if (!summary.ok) {
-    console.error(`[StartGated] Healthcheck failed — refusing to start ${name}`);
-    process.exit(1);
+    if (summary.ok) {
+      console.log(`[StartGated] Healthcheck passed — starting ${name}`);
+      // Service entry modules run their own main() at import time.
+      await import(service.entry);
+      return;
+    }
+
+    if (attempt < HEALTHCHECK_ATTEMPTS) {
+      console.warn(
+        `[StartGated] Healthcheck failed — retrying in ${Math.round(RETRY_DELAY_MS / 1000)}s ` +
+          `(cold-boot network warmup tolerance)`,
+      );
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+    }
   }
 
-  console.log(`[StartGated] Healthcheck passed — starting ${name}`);
-  // Service entry modules run their own main() at import time.
-  await import(service.entry);
+  console.error(
+    `[StartGated] Healthcheck failed after ${HEALTHCHECK_ATTEMPTS} attempts — refusing to start ${name}`,
+  );
+  process.exit(1);
 }
 
 main().catch((err) => {

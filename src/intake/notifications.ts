@@ -50,8 +50,36 @@ export function formatNotification(payload: NotificationPayload): string {
   }
 }
 
-// Subscribes to new human_notification artifacts via Supabase Realtime.
-// Forwards each one to Telegram immediately.
+const POLL_INTERVAL_MS = Number(process.env.NOTIFY_POLL_INTERVAL_MS ?? 60_000);
+const POLL_LOOKBACK_MS = Number(process.env.NOTIFY_POLL_LOOKBACK_MS ?? 600_000);
+
+/** Artifact ids already forwarded, so Realtime and the poller never double-send. */
+const deliveredIds = new Set<string>();
+
+async function forwardNotification(
+  artifactId: string,
+  content: NotificationPayload | null,
+): Promise<void> {
+  if (!content || deliveredIds.has(artifactId)) return;
+  deliveredIds.add(artifactId);
+  try {
+    await sendNotification(formatNotification(content));
+    console.log(`[Notifications] Delivered ${content.type} for ${content.task_id} (${artifactId})`);
+  } catch (err) {
+    // Un-mark so the poller retries on its next cycle instead of dropping it.
+    deliveredIds.delete(artifactId);
+    console.error("[Notifications] Failed to send Telegram notification:", err);
+  }
+}
+
+// Watches for new human_notification artifacts on two channels:
+//   1. Supabase Realtime (instant) — requires the artifacts table in the
+//      supabase_realtime publication (migration 005). Misconfiguration there
+//      is SILENT: the channel subscribes fine and simply never fires.
+//   2. Polling fallback (default every 60 s, 10 min lookback) — guarantees
+//      delivery even when Realtime is misconfigured or drops the connection,
+//      and redelivers notifications written during a short intake restart.
+// deliveredIds dedupes across both channels.
 export function startNotificationWatcher(): void {
   db.channel("human-notifications")
     .on(
@@ -63,19 +91,48 @@ export function startNotificationWatcher(): void {
         filter: "artifact_type=eq.human_notification",
       },
       async (change) => {
-        try {
-          const content = change.new.content as NotificationPayload | null;
-          if (!content) return;
-          const message = formatNotification(content);
-          await sendNotification(message);
-        } catch (err) {
-          console.error("[Notifications] Failed to send Telegram notification:", err);
-        }
+        await forwardNotification(
+          change.new.id as string,
+          change.new.content as NotificationPayload | null,
+        );
       },
     )
-    .subscribe((status) => {
+    .subscribe((status, err) => {
       if (status === "SUBSCRIBED") {
         console.log("[Notifications] Watching for human_notification artifacts via Realtime");
+      } else {
+        console.warn(`[Notifications] Realtime channel status: ${status}`, err ?? "");
       }
     });
+
+  // Watermark starts one lookback window in the past so notifications written
+  // just before an intake restart still get delivered.
+  let watermark = new Date(Date.now() - POLL_LOOKBACK_MS).toISOString();
+
+  setInterval(async () => {
+    try {
+      const { data, error } = await db
+        .from("artifacts")
+        .select("id, content, created_at")
+        .eq("artifact_type", "human_notification")
+        .gt("created_at", watermark)
+        .order("created_at", { ascending: true });
+      if (error || !data) return;
+
+      for (const row of data as Array<{
+        id: string;
+        content: NotificationPayload | null;
+        created_at: string;
+      }>) {
+        await forwardNotification(row.id, row.content);
+        if (row.created_at > watermark) watermark = row.created_at;
+      }
+    } catch (err) {
+      console.error("[Notifications] Poll cycle failed:", err);
+    }
+  }, POLL_INTERVAL_MS);
+
+  console.log(
+    `[Notifications] Polling fallback active (every ${Math.round(POLL_INTERVAL_MS / 1000)} s)`,
+  );
 }

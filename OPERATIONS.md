@@ -86,6 +86,66 @@ powershell -ExecutionPolicy Bypass -File scripts/setup-pm2-windows.ps1
 Host settings for 24/7: disable sleep/hibernate, and set Windows Update active
 hours so forced reboots land when a `pm2 save` + startup hook can recover.
 
+## Recovery Runbook
+
+Symptom-first. Every path below assumes `pm2 status` and Telegram alerts as the
+starting signal. Never fix state by hand before capturing it (`smoke:inspect`).
+
+| Symptom | Likely cause | Recovery |
+|---------|--------------|----------|
+| Telegram alert: task stuck in `IN_PROGRESS`/`VERIFYING` | Cell crashed mid-run or verdict saved but transition failed | `npm run smoke:inspect -- T-NNN`; if a verification record exists → `npm run recover:verdict -- T-NNN`; else wait one visibility timeout (job redelivers), then inspect again |
+| Telegram alert: credits/network failures | OpenRouter credits exhausted or Supabase transport blips | Check https://openrouter.ai/credits; top up. Transport blips self-heal via retry-fetch — recurring ones warrant a look at `pm2 logs` |
+| Telegram alert: queue depth over threshold | Scheduler down or wedged | `pm2 status` → if stopped/errored: `pm2 restart taskgraph-scheduler`; then confirm depth drains on the next watchdog cycle |
+| healthchecks.io alert (no Telegram) | Host or watchdog dead — Telegram alerts die with the host | Check the machine: power, sleep, Windows Update reboot. After boot: `pm2 status`; if empty, `pm2 resurrect` |
+| A gated service restart-loops | Bad/expired credential — gate is refusing to start it (by design) | `pm2 logs <app> --lines 50` shows which probe fails; fix the secret in `.env`; the next backoff retry picks it up |
+| Task failed after max rework | Contract scope vs verifier mismatch or genuinely hard task | Read the `rework_escalated` notification defects; revise scope and re-seed per `system-knowledge/operations/re-seed-and-queue-hygiene.md` |
+| Notification you expected never arrived | Realtime publication missing (migration 005) or intake down > poll lookback | `pm2 logs taskgraph-intake` for `[Notifications] Delivered ...` lines; run migration 005; poller redelivers anything within `NOTIFY_POLL_LOOKBACK_MS` |
+
+## Secret Rotation
+
+All secrets live in `.env` only (never committed; `.gitignore` enforced).
+
+1. Rotate at the provider: Supabase (service role key), OpenRouter, Telegram
+   (@BotFather `/revoke`), GitHub (token), webhook secret (GitHub repo settings).
+2. Update `.env`.
+3. `pm2 restart all --update-env` — the healthcheck gate validates the new
+   credentials before either service starts; a typo means backoff-retries, not
+   a half-started stack.
+4. Rotate on suspicion, not schedule, for v1 — but the service role key and
+   `GITHUB_TOKEN` are the two with real blast radius; prefer fine-grained,
+   repo-scoped GitHub tokens.
+
+## Supabase Backup
+
+- Supabase Pro keeps daily automatic backups; on the free tier, export weekly:
+  dashboard → Database → Backups, or `pg_dump` via the connection string.
+- The tables that matter for audit/recovery: `tasks`, `task_events`,
+  `contracts`, `evidence_records`, `verification_records`, `artifacts`,
+  `agent_runs`. Queues (`pgmq_*`) are transient — do not bother restoring them.
+- After a restore, run `npm run reseed:hygiene -- T-NNN` on any task that was
+  mid-flight when the snapshot was taken.
+
+## Production v1 — Scope Declaration
+
+In scope (proven): Telegram `/task` → COMPLETE unattended on external repos;
+pm2-supervised scheduler + intake + watchdog; deep healthcheck gating; runtime
+alerting with off-host dead-man's switch; rework loop with cap + escalation.
+
+**Explicitly out of scope for v1:**
+
+- `SCHEDULER_WORKERS > 1` (parallel workers stay at 1)
+- Auto-merge / auto-deploy of produced PRs
+- GitHub webhook intake (code-complete, unproven — needs public tunnel; v1.1)
+- Browser/staging verification
+- Design / Release cells (stubs)
+- Deep planning memory (`deep-planning-memory.md`)
+- Multi-host scheduler fleet; APM beyond Telegram + logs
+- Automatic secret rotation
+
+Declaration gate: Phase 5 soak (24 h+, zero undetected process deaths,
+time-to-alert < 15 min) recorded in
+`system-knowledge/operations/soak-2026-07.md`.
+
 ## Queue Payloads
 
 Logical queue names use dotted event names in code. Physical pgmq queues use underscores.
