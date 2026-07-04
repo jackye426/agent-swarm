@@ -73,3 +73,25 @@ test("formatNotification formats dependency_unblocked", () => {
   assert.match(message, /dependency cleared/);
   assert.match(message, /T-011/);
 });
+
+test("formatNotification formats work_integrated", () => {
+  const message = formatNotification({
+    type: "work_integrated",
+    task_id: "T-013",
+    message: "T-013's changes were merged into the default branch.",
+  });
+
+  assert.match(message, /work integrated/);
+  assert.match(message, /default branch/);
+});
+
+test("formatNotification formats integration_conflict", () => {
+  const message = formatNotification({
+    type: "integration_conflict",
+    task_id: "T-014",
+    message: "T-014 is COMPLETE but could not be merged automatically.",
+  });
+
+  assert.match(message, /integration needs attention/);
+  assert.match(message, /could not be merged/);
+});

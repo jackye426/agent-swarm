@@ -31,6 +31,7 @@ import {
 import { scrubHarnessLinesFromGitignore, writeWorktreeSupportFiles } from "./worktree-support.js";
 import { fileMatchesScopeOutItem } from "./commit-guard.js";
 import { readKnowledgeExcerpt } from "../../core/knowledge-excerpt.js";
+import { buildClaudeCodePipeShellCommand } from "./claude-code-config.js";
 
 const EngineeringState = Annotation.Root({
   taskId: Annotation<string>(),
@@ -423,9 +424,7 @@ async function invokeClaudeCode(state: S): Promise<Partial<S>> {
     const planFile = path.join(promptDir, `${state.agentRunId ?? "run"}.txt`);
     await writeFile(planFile, authorizedPrompt, "utf8");
 
-    const shellCmd = process.platform === "win32"
-      ? `Get-Content -LiteralPath '${planFile.replace(/'/g, "''")}' -Raw | & ${workerCommand} --print --dangerously-skip-permissions`
-      : `cat '${planFile.replace(/'/g, "'\\''")}' | ${workerCommand} --print --dangerously-skip-permissions`;
+    const shellCmd = buildClaudeCodePipeShellCommand(workerCommand, planFile);
 
     result = await runShellCommand(shellCmd, { cwd: state.worktreePath, timeoutMs });
   }

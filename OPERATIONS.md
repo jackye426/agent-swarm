@@ -13,7 +13,7 @@
 3. Copy `.env.example` to `.env` and set real secrets.
 4. Install and authenticate required CLIs on the scheduler host:
    - `git`
-   - Claude Code CLI matching `CLAUDE_CODE_COMMAND`
+   - Claude Code CLI matching `CLAUDE_CODE_COMMAND` (optional `CLAUDE_CODE_MODEL` for `--model`)
    - `gh` if `GITHUB_CREATE_PR=true`
 5. Run local gates:
    - `npm run typecheck`
@@ -216,6 +216,6 @@ For production runs, prefer explicit JSON so approval records are attributable.
 
 - Supabase service role key is available only to trusted backend/scheduler runtime.
 - Role-based Planning and Verification model calls go through OpenRouter using `OPENROUTER_API_KEY`.
-- Model choices are configured per role with `MODEL_PLANNING_A`, `MODEL_PLANNING_B`, `MODEL_PLANNING_A_REVIEW`, `MODEL_PLANNING_B_REVIEW`, `MODEL_PLANNING_CONSENSUS`, `MODEL_CONTRACT_DRAFT`, `MODEL_CONTRACT_REVISION`, `MODEL_ENGINEERING_PLAN`, and `MODEL_VERIFICATION`.
+- Model choices are configured per role with `MODEL_PLANNING_A`, `MODEL_PLANNING_B`, `MODEL_PLANNING_A_REVIEW`, `MODEL_PLANNING_B_REVIEW`, `MODEL_PLANNING_CONSENSUS`, `MODEL_CONTRACT_DRAFT`, `MODEL_CONTRACT_REVISION`, `MODEL_ENGINEERING_PLAN`, and `MODEL_VERIFICATION`. The engineering **implementation** worker (Claude Code CLI) uses `CLAUDE_CODE_MODEL` separately — it is not routed through OpenRouter.
 - The scheduler host has filesystem permission to create git worktrees under `TASKGRAPH_WORKTREE_ROOT`.
 - Claude Code and GitHub CLI authentication are managed outside the repository.

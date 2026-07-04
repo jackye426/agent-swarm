@@ -7,6 +7,10 @@ import {
   deriveTaskVerdict,
   routeVerdictByFailureOwner,
 } from "../src/core/verification.js";
+import {
+  formatBindingProductDecisions,
+  formatVerificationRequirementsSection,
+} from "../src/core/requirements.js";
 
 const baseContract = TaskContractSchema.parse({
   id: "T-900",
@@ -135,4 +139,21 @@ test("verification routing sends implementation defects to rework", () => {
 
 test("verification routing sends contract ambiguity to blocked planning route", () => {
   assert.equal(routeVerdictByFailureOwner("BLOCKED", "contract"), "BLOCKED");
+});
+
+test("verification routing sends contract-owned rework verdicts to blocked planning route", () => {
+  assert.equal(routeVerdictByFailureOwner("REWORK_REQUIRED", "contract"), "BLOCKED");
+});
+
+test("binding product decisions prompt helpers omit empty input and include conflict guidance", () => {
+  assert.equal(formatBindingProductDecisions("  "), "");
+  assert.equal(formatVerificationRequirementsSection(null), "");
+
+  const draftBlock = formatBindingProductDecisions("Express dependencies are allowed.");
+  assert.match(draftBlock, /BINDING PRODUCT DECISIONS/);
+  assert.match(draftBlock, /must not forbid it/);
+
+  const verifierBlock = formatVerificationRequirementsSection("Express dependencies are allowed.");
+  assert.match(verifierBlock, /Product owner requirements \(binding\)/);
+  assert.match(verifierBlock, /Express dependencies/);
 });

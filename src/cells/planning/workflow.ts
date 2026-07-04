@@ -30,6 +30,8 @@ import {
 
   getLatestContract,
 
+  getTaskRequirementsSummary,
+
   publishContractVersion,
 
   recordApproval,
@@ -43,6 +45,8 @@ import { enqueue } from "../../db/queue.js";
 import { transitionTaskStatus } from "../../db/tasks.js";
 
 import { enqueueVerificationForTask } from "../../../scripts/lib/verification-enqueue.js";
+
+import { formatBindingProductDecisions } from "../../core/requirements.js";
 
 
 
@@ -59,6 +63,8 @@ const PlanningState = Annotation.Root({
   goal:           Annotation<string>(),
 
   context:        Annotation<string>(),        // serialised context packet
+
+  requirementsSummary: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
 
   stopAfterDraft: Annotation<boolean>({ default: () => false, reducer: (_, v) => v }),
 
@@ -133,6 +139,14 @@ Acceptance criterion verification methods MUST be pipeline-executable:
 
 
 // ---- Nodes ----
+
+
+
+async function loadRequirementsSummary(state: S): Promise<Partial<S>> {
+
+  return { requirementsSummary: await getTaskRequirementsSummary(state.taskId) };
+
+}
 
 
 
@@ -236,6 +250,8 @@ and identify disagreements that must be resolved before a task contract is draft
 
 ${GROUNDING_SYSTEM_LINE}
 
+${formatBindingProductDecisions(state.requirementsSummary)}
+
 Output: adopted ideas, rejected ideas with reasons, unresolved disagreements, risk updates, and your revised recommendation.`,
 
     },
@@ -287,6 +303,8 @@ You must defend your own plan where it is stronger, adopt Planner A's ideas wher
 and identify disagreements that must be resolved before a task contract is drafted.
 
 ${GROUNDING_SYSTEM_LINE}
+
+${formatBindingProductDecisions(state.requirementsSummary)}
 
 Output: adopted ideas, rejected ideas with reasons, unresolved disagreements, risk updates, and your revised recommendation.`,
 
@@ -491,6 +509,10 @@ Rules:
 - "approvals_required" is an array of plain strings like "Product" or "Engineering"
 
 - "risks" elements have only "risk" and "mitigation" string fields
+
+- Prefer the simplest design that satisfies the stated requirements. If a requirement forces complexity (e.g. cross-device persistence forces a backend), say so explicitly in the contract risks or constraints so the user can simplify the requirement instead.
+
+${formatBindingProductDecisions(state.requirementsSummary)}
 
 ${CONTRACT_DRAFT_VERIFICATION_RULES}
 
@@ -1148,6 +1170,7 @@ ${JSON.stringify(packet, null, 2)}`,
       agentRunId: input.agentRunId,
       goal: revised.goal,
       context: JSON.stringify(packet),
+      requirementsSummary: await getTaskRequirementsSummary(input.taskId),
       stopAfterDraft: false,
       planA: null,
       planB: null,
@@ -1180,6 +1203,8 @@ function afterDraft(state: S): "stop" | "approve" {
 
 const graph = new StateGraph(PlanningState)
 
+  .addNode("loadRequirementsSummary", loadRequirementsSummary)
+
   .addNode("producePlanA",           producePlanA)
 
   .addNode("producePlanB",           producePlanB)
@@ -1194,9 +1219,11 @@ const graph = new StateGraph(PlanningState)
 
   .addNode("autoApproveContract",    autoApproveContract)
 
-  .addEdge("__start__",              "producePlanA")
+  .addEdge("__start__",              "loadRequirementsSummary")
 
-  .addEdge("__start__",              "producePlanB")        // parallel with producePlanA
+  .addEdge("loadRequirementsSummary", "producePlanA")
+
+  .addEdge("loadRequirementsSummary", "producePlanB")        // parallel after requirements load
 
   .addEdge("producePlanA",           "reviewPlanBAsA")
 

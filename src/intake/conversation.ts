@@ -365,9 +365,31 @@ async function knownRepos(chatId: string): Promise<{ repos: string[]; chatDefaul
   return { repos: [...repos].slice(0, 10), chatDefault };
 }
 
+export async function recentWorkSummary(): Promise<string> {
+  try {
+    const { data } = await db
+      .from("tasks")
+      .select("id, title, status, repo_full_name")
+      .order("id", { ascending: false })
+      .limit(15);
+
+    return ((data ?? []) as Array<{
+      id: string;
+      title: string;
+      status: string;
+      repo_full_name: string | null;
+    }>)
+      .map((task) => `${task.id} [${task.status}] ${task.repo_full_name ?? "(no repo)"} — ${task.title}`)
+      .join("\n");
+  } catch {
+    return "";
+  }
+}
+
 interface PromptContext {
   repos: string[];
   chatDefault: string | null;
+  workSummary?: string | null;
   repoSnapshot: string | null;
   notes: string | null;
 }
@@ -383,6 +405,11 @@ THE USER IS NOT TECHNICAL. Never ask for repo slugs, branch names, or command sy
 Known project repositories (most recently used first):
 ${repoList}
 ${ctx.chatDefault ? `Default for this chat: ${ctx.chatDefault}` : "No default repo for this chat."}
+${
+  ctx.workSummary?.trim()
+    ? `\nEXISTING AND IN-FLIGHT WORK (source of truth — the user may refer to these in plain words):\n${ctx.workSummary.trim()}\nWhen the user asks to change or extend something listed above, that project EXISTS:\ndo not ask them to describe it from scratch. Completed work is merged into the repo,\nso the repo snapshot reflects it. Create NEW tasks for the change, referencing the\nexisting files.`
+    : ""
+}
 If the target project is ambiguous, ask in plain words (e.g. "Is this for the sandbox project or the agent-swarm project?") and map the answer to a repo yourself. As soon as you have settled which repo the work targets, include it as "repo" on your reply action — the system will then give you a snapshot of that repo's contents.
 ${
   ctx.repoSnapshot
@@ -411,6 +438,7 @@ TASK SIZING RULES (the pipeline's proven envelope — breaking these causes fail
 - Each task must be verifiable mechanically. Say so in the task's context.
 - Big projects become a CHAIN of such tasks, each depends_on_previous so they execute strictly in order.
 - Each task's context should carry constraints the builder needs: which files, test command, "no new dependencies" if applicable, and anything agreed in this conversation that the task depends on.
+- Prefer the simplest design that satisfies the stated requirements. If a requirement forces complexity (e.g. cross-device persistence forces a backend), say so explicitly in your proposal so the user can simplify the requirement instead.
 - Tasks run autonomously once created — a task's goal+context must stand alone without this chat.
 
 RESPONSE FORMAT — you MUST reply with a single JSON object, nothing else:
@@ -502,6 +530,7 @@ export async function handleConversationMessage(
   }
 
   const { repos, chatDefault } = await knownRepos(chatId);
+  const workSummary = await recentWorkSummary();
 
   // Ground the conversation in the settled repo (or the chat default).
   const groundingRepo = state.repo ?? chatDefault;
@@ -514,7 +543,7 @@ export async function handleConversationMessage(
       [
         {
           role: "system",
-          content: buildSystemPrompt({ repos, chatDefault, repoSnapshot, notes: state.notes }),
+          content: buildSystemPrompt({ repos, chatDefault, workSummary, repoSnapshot, notes: state.notes }),
         },
         ...state.messages,
         userMessage,

@@ -131,6 +131,32 @@ test("buildSystemPrompt embeds snapshot and notes when present", () => {
   assert.match(prompt, /requirements_summary is REQUIRED/);
 });
 
+test("buildSystemPrompt embeds existing work summary when provided", () => {
+  const prompt = buildSystemPrompt({
+    repos: ["jackye426/swarm-sandbox"],
+    chatDefault: "jackye426/swarm-sandbox",
+    workSummary: "T-012 [COMPLETE] jackye426/swarm-sandbox — Dark-Themed To-Do List Frontend",
+    repoSnapshot: null,
+    notes: null,
+  });
+
+  assert.match(prompt, /EXISTING AND IN-FLIGHT WORK/);
+  assert.match(prompt, /T-012 \[COMPLETE\]/);
+  assert.match(prompt, /project EXISTS/);
+});
+
+test("buildSystemPrompt omits existing work summary when empty", () => {
+  const prompt = buildSystemPrompt({
+    repos: [],
+    chatDefault: null,
+    workSummary: "",
+    repoSnapshot: null,
+    notes: null,
+  });
+
+  assert.doesNotMatch(prompt, /EXISTING AND IN-FLIGHT WORK/);
+});
+
 test("appendProjectNote keeps the most recent tail under the cap", () => {
   const notes = appendProjectNote("a".repeat(3_990), "[2026-07-04] new entry");
   assert.ok(notes.length <= 4_000);

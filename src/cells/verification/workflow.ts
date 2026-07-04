@@ -13,13 +13,16 @@ import {
   routeVerdictByFailureOwner,
 } from "../../core/verification.js";
 import { classifyVerificationMethod } from "../../core/contract-executability.js";
+import { integrateCompletedTaskBranch } from "../../core/branch-integration.js";
 import { invokeRoleModel } from "../../core/model-router.js";
 import { readKnowledgeExcerpt } from "../../core/knowledge-excerpt.js";
+import { formatVerificationRequirementsSection } from "../../core/requirements.js";
 import {
   dependenciesComplete,
   getDependentTaskIds,
   getLatestContract,
   getReworkAttemptCount,
+  getTaskRequirementsSummary,
   recordArtifact,
   recordVerification,
   requiredApprovalsRecorded,
@@ -93,6 +96,8 @@ async function runModelReview(state: S): Promise<Partial<S>> {
 
   const scopeIn = state.contract.scope.in.map((s) => `- ${s}`).join("\n");
   const scopeOut = state.contract.scope.out.map((s) => `- ${s}`).join("\n");
+  const requirementsSummary = await getTaskRequirementsSummary(state.taskId);
+  const requirementsSection = formatVerificationRequirementsSection(requirementsSummary);
 
   // Source: system-knowledge/concepts/evidence-and-verification.md#verifier-judging-rules (v1)
   const judgingRules = readKnowledgeExcerpt(
@@ -109,6 +114,7 @@ Use PASS, FAIL, INCONCLUSIVE, or NOT_APPLICABLE for every acceptance criterion.
 failure_owner must be one of: implementation, contract, human_decision, infrastructure, unknown.
 Use implementation when code/tests should be reworked.
 Use contract when the acceptance criterion, scope, or evidence requirement is contradictory, vague, or impossible to satisfy.
+If an acceptance criterion conflicts with the product owner requirements, use failure_owner "contract" — do not classify it as implementation.
 Use human_decision only when the product owner must choose behavior.
 Use infrastructure for credentials, network, CI, dependency installation, or external service failures.
 Use unknown when you cannot confidently classify the owner.
@@ -124,6 +130,7 @@ ${scopeIn || "(none)"}
 
 Scope out:
 ${scopeOut || "(none)"}
+${requirementsSection}
 
 Acceptance criteria:
 ${acList}
@@ -415,6 +422,38 @@ async function publishVerificationRecord(state: S): Promise<Partial<S>> {
         notified_at: new Date().toISOString(),
       },
     });
+    const integration = await integrateCompletedTaskBranch(state.taskId).catch(
+      (err) => ({
+        ok: false,
+        merged: false,
+        detail: err instanceof Error ? err.message : String(err),
+      }),
+    );
+    if (integration.merged) {
+      await recordArtifact({
+        taskId: state.taskId,
+        artifactType: "human_notification",
+        content: {
+          type: "work_integrated",
+          task_id: state.taskId,
+          message: `${state.taskId}'s changes were merged into the default branch.`,
+          notified_at: new Date().toISOString(),
+        },
+      });
+    } else if (!integration.ok) {
+      await recordArtifact({
+        taskId: state.taskId,
+        artifactType: "human_notification",
+        content: {
+          type: "integration_conflict",
+          task_id: state.taskId,
+          message:
+            `${state.taskId} is COMPLETE but could not be merged automatically: ${integration.detail}. ` +
+            `Merge branch taskgraph/${state.taskId.toLowerCase()} manually.`,
+          notified_at: new Date().toISOString(),
+        },
+      });
+    }
     // Dependent tasks parked at AWAITING_APPROVAL (waiting_on_dependency) have
     // no queue message left — without this wake-up, chains deadlock one step
     // after the first task completes.

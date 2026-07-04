@@ -73,6 +73,16 @@ export function formatNotification(payload: NotificationPayload): string {
         `${payload.message ?? "A credential, network, CI, or external-service issue blocked verification."}\n\n` +
         `${payload.recommended_next_step ?? "Check runtime credentials and logs."}`
       );
+    case "work_integrated":
+      return (
+        `📦 ${taskLink} — work integrated\n\n` +
+        `${payload.message ?? "Changes were merged into the default branch."}`
+      );
+    case "integration_conflict":
+      return (
+        `⚠️ ${taskLink} — integration needs attention\n\n` +
+        `${payload.message ?? "Task is complete but automatic merge failed."}`
+      );
     case "task_complete":
       return (
         `🎉 ${taskLink} — COMPLETE\n\n` +

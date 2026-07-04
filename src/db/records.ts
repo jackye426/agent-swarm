@@ -238,6 +238,19 @@ export async function getLatestContextPacket(taskId: string): Promise<JsonObject
   return (data as { content: JsonObject } | null)?.content ?? null;
 }
 
+export async function getTaskRequirementsSummary(taskId: string): Promise<string | null> {
+  const { data, error } = await db
+    .from("tasks")
+    .select("source_context")
+    .eq("id", taskId)
+    .single();
+
+  assertNoError(error, `Failed to load requirements summary for ${taskId}`);
+  const sourceContext = (data as { source_context: JsonObject | null }).source_context;
+  const summary = sourceContext?.requirements_summary;
+  return typeof summary === "string" && summary.trim() ? summary.trim() : null;
+}
+
 export async function recordEvidence(input: EvidenceRecord & { agentRunId?: string | null }): Promise<void> {
   const { error } = await db.from("evidence_records").upsert({
     id: input.evidence_id,

@@ -21,6 +21,7 @@ import {
 import { scrubHarnessLinesFromGitignore } from "../src/cells/engineering/worktree-support.js";
 import {
   hasStagedChanges,
+  removeExcludedFilesFromDisk,
   restoreScopeOutFilesBeforeCommit,
   stageAllExceptExcluded,
   unstageExcludedPaths,
@@ -160,6 +161,7 @@ async function finalizeFixedWorktree(): Promise<void> {
   const contract = await getLatestContract(taskId);
   await restoreTrackedHarnessFiles(worktree.path);
   await scrubHarnessLinesFromGitignore(worktree.path, taskId);
+  await removeExcludedFilesFromDisk(worktree.path, taskId);
 
   const test = await runShellCommand("npm run test:api", {
     cwd: worktree.path,

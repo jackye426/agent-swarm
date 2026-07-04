@@ -49,6 +49,7 @@ Used by the verification cell model prompt (source: this section):
 - **diff_inspection verification**: judge primarily from the PR diff; do not require CI alone
 - **human verification**: PASS only if explicit human evidence exists; otherwise INCONCLUSIVE or NOT_APPLICABLE
 - **Scope violations**: flag if changed files appear to touch scope.out areas
+- **Product-owner requirements**: if an acceptance criterion conflicts with binding product-owner requirements from intake, classify the failure owner as `contract`, not `implementation`
 
 ## deriveTaskVerdict priority chain
 
