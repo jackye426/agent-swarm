@@ -1,40 +1,35 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  commitExcludedPaths,
   filterExcludedCommitPaths,
   isExcludedCommitPath,
-  normalizeRepoPath,
+  worktreeLocalExcludeEntries,
 } from "../src/cells/engineering/commit-guard.js";
 
-test("normalizeRepoPath converts backslashes and strips ./ prefix", () => {
-  assert.equal(normalizeRepoPath(".\\tasks\\T-007\\contract.yaml"), "tasks/T-007/contract.yaml");
-  assert.equal(normalizeRepoPath("./src/foo.js"), "src/foo.js");
+test("TaskGraph harness files are excluded from product commits", () => {
+  assert.equal(isExcludedCommitPath("T-012", ".taskgraph_impl_plan.txt"), true);
+  assert.equal(isExcludedCommitPath("T-012", ".taskgraph-seed-scan.json"), true);
+  assert.equal(isExcludedCommitPath("T-012", "nested/.taskgraph-debug.txt"), true);
+  assert.equal(isExcludedCommitPath("T-012", "tasks/T-012/contract.yaml"), true);
+  assert.equal(isExcludedCommitPath("T-012", "tasks/T-012/evidence/result.yaml"), true);
+  assert.equal(isExcludedCommitPath("T-012", "server.js"), false);
 });
 
-test("commitExcludedPaths includes task contract path", () => {
-  const paths = commitExcludedPaths("T-007");
-  assert.ok(paths.includes("tasks/T-007/contract.yaml"));
-  assert.ok(paths.includes(".taskgraph_impl_plan.txt"));
+test("filterExcludedCommitPaths returns only harness files to unstage", () => {
+  assert.deepEqual(
+    filterExcludedCommitPaths("T-012", [
+      "server.js",
+      ".taskgraph_impl_plan.txt",
+      "public/index.html",
+      "tasks/T-012/contract.yaml",
+    ]),
+    [".taskgraph_impl_plan.txt", "tasks/T-012/contract.yaml"],
+  );
 });
 
-test("isExcludedCommitPath excludes .taskgraph* and own contract", () => {
-  assert.equal(isExcludedCommitPath("T-007", "tasks/T-007/contract.yaml"), true);
-  assert.equal(isExcludedCommitPath("T-007", ".taskgraph_impl_plan.txt"), true);
-  assert.equal(isExcludedCommitPath("T-007", ".taskgraph-seed-scan.json"), true);
-  assert.equal(isExcludedCommitPath("T-007", ".taskgraph-custom.json"), true);
-  assert.equal(isExcludedCommitPath("T-007", "src/healthcheck.js"), false);
-});
-
-test("isExcludedCommitPath does not exclude another task contract", () => {
-  assert.equal(isExcludedCommitPath("T-007", "tasks/T-006/contract.yaml"), false);
-});
-
-test("filterExcludedCommitPaths returns only excluded paths", () => {
-  const filtered = filterExcludedCommitPaths("T-007", [
-    "src/index.js",
-    "tasks/T-007/contract.yaml",
-    ".taskgraph_impl_plan.txt",
-  ]);
-  assert.deepEqual(filtered, ["tasks/T-007/contract.yaml", ".taskgraph_impl_plan.txt"]);
+test("worktree local excludes cover all TaskGraph harness paths", () => {
+  assert.deepEqual(
+    worktreeLocalExcludeEntries("T-012"),
+    [".taskgraph*", "tasks/T-012/contract.yaml", "tasks/T-012/evidence/"],
+  );
 });

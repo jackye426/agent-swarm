@@ -10,6 +10,7 @@ import { z } from "zod";
 import { dequeue, ack } from "../db/queue.js";
 import type { CellType, QueueJobType } from "../core/types.js";
 import {
+  ContractRevisionRequestedPayloadSchema,
   ExecutionRequestedPayloadSchema,
   PlanRequestedPayloadSchema,
   VerificationRequestedPayloadSchema,
@@ -33,7 +34,7 @@ import {
   resolveTestCommandsFromPacket,
 } from "../core/contract-executability.js";
 import { formatReworkContextForEngineering } from "../core/rework-context.js";
-import { getPlanningWorkflow } from "../cells/planning/workflow.js";
+import { getPlanningWorkflow, reviseContractFromVerification } from "../cells/planning/workflow.js";
 import { engineeringWorkflow } from "../cells/engineering/workflow.js";
 import { verificationWorkflow } from "../cells/verification/workflow.js";
 import {
@@ -41,6 +42,7 @@ import {
   enqueueVerificationForTask,
 } from "../../scripts/lib/verification-enqueue.js";
 import {
+  isStaleContractRevisionJob,
   isStaleExecutionJob,
   isStalePlanningJob,
   isStaleReworkJob,
@@ -50,6 +52,7 @@ import { WORKER_TYPE_BY_QUEUE } from "../core/worker-types.js";
 
 const QUEUES: QueueJobType[] = [
   "task.plan.requested",
+  "task.contract_revision.requested",
   "task.execution.requested",
   "task.verification.requested",
   "task.rework.requested",
@@ -61,6 +64,7 @@ const VISIBILITY_TIMEOUT_S = Number(process.env.SCHEDULER_VISIBILITY_TIMEOUT_S ?
 function queueCell(queueName: QueueJobType): CellType {
   switch (queueName) {
     case "task.plan.requested": return "planning";
+    case "task.contract_revision.requested": return "planning";
     case "task.execution.requested": return "engineering";
     case "task.verification.requested": return "verification";
     case "task.design.requested": return "design";
@@ -85,6 +89,76 @@ async function transitionIfLegal(taskId: string, to: Parameters<typeof transitio
 }
 
 type JobResult = "skip" | "ack_stale" | void;
+
+async function preflightJob(queueName: QueueJobType, payload: Record<string, unknown>): Promise<JobResult> {
+  switch (queueName) {
+    case "task.plan.requested": {
+      const parsed = PlanRequestedPayloadSchema.parse(payload);
+      const status = await getTaskStatus(parsed.task_id);
+      if (isStalePlanningJob(status)) {
+        console.log(`[Scheduler] Stale planning job for ${parsed.task_id} (status=${status}) — acking`);
+        return "ack_stale";
+      }
+      return;
+    }
+
+    case "task.contract_revision.requested": {
+      const parsed = ContractRevisionRequestedPayloadSchema.parse(payload);
+      const status = await getTaskStatus(parsed.task_id);
+      if (isStaleContractRevisionJob(status)) {
+        console.log(
+          `[Scheduler] Stale contract revision job for ${parsed.task_id} ` +
+            `(status=${status}, expected BLOCKED) — acking`,
+        );
+        return "ack_stale";
+      }
+      return;
+    }
+
+    case "task.execution.requested": {
+      const parsed = ExecutionRequestedPayloadSchema.parse(payload);
+      const status = await getTaskStatus(parsed.task_id);
+      if (isStaleExecutionJob(status)) {
+        console.log(`[Scheduler] Stale execution job for ${parsed.task_id} (status=${status}, expected READY) — acking`);
+        return "ack_stale";
+      }
+      if (!(await dependenciesComplete(parsed.task_id))) {
+        console.log(`[Scheduler] ${parsed.task_id} has incomplete dependencies — skipping, will retry`);
+        return "skip";
+      }
+      return;
+    }
+
+    case "task.rework.requested": {
+      const parsed = ReworkRequestedPayloadSchema.parse(payload);
+      const status = await getTaskStatus(parsed.task_id);
+      if (isStaleReworkJob(status)) {
+        console.log(
+          `[Scheduler] Stale rework job for ${parsed.task_id} (status=${status}, expected REWORK_REQUIRED) — acking`,
+        );
+        return "ack_stale";
+      }
+      if (!(await dependenciesComplete(parsed.task_id))) {
+        console.log(`[Scheduler] ${parsed.task_id} rework has incomplete dependencies — skipping`);
+        return "skip";
+      }
+      return;
+    }
+
+    case "task.verification.requested": {
+      const parsed = VerificationRequestedPayloadSchema.parse(payload);
+      const status = await getTaskStatus(parsed.task_id);
+      if (isStaleVerificationJob(status)) {
+        console.log(`[Scheduler] Stale verification job for ${parsed.task_id} (status=${status}) — acking`);
+        return "ack_stale";
+      }
+      return;
+    }
+
+    default:
+      return;
+  }
+}
 
 async function processJob(queueName: QueueJobType, payload: Record<string, unknown>, agentRunId: string): Promise<JobResult> {
   console.log(`[Scheduler] Processing ${queueName} for task ${payload.task_id}`);
@@ -118,6 +192,30 @@ async function processJob(queueName: QueueJobType, payload: Record<string, unkno
       );
 
       if (planResult.error) throw new Error(`Planning workflow error: ${planResult.error}`);
+      break;
+    }
+
+    case "task.contract_revision.requested": {
+      const parsed = ContractRevisionRequestedPayloadSchema.parse(payload);
+      const revisionStatus = await getTaskStatus(parsed.task_id);
+      if (isStaleContractRevisionJob(revisionStatus)) {
+        console.log(
+          `[Scheduler] Stale contract revision job for ${parsed.task_id} ` +
+            `(status=${revisionStatus}, expected BLOCKED) — acking`,
+        );
+        return "ack_stale";
+      }
+
+      const result = await reviseContractFromVerification({
+        taskId: parsed.task_id,
+        agentRunId,
+        failedAcIds: parsed.failed_ac_ids,
+        failureSummary: parsed.failure_summary,
+        recommendedNextStep: parsed.recommended_next_step,
+        questionForUser: parsed.question_for_user,
+        verifierReason: parsed.verifier_reason,
+      });
+      if (result.error) throw new Error(`Contract revision workflow error: ${result.error}`);
       break;
     }
 
@@ -266,6 +364,15 @@ export async function poll(): Promise<void> {
 
       const payload = msg.message;
       const taskId = z.string().regex(/^T-\d+$/).parse(payload.task_id);
+      const preflight = await preflightJob(queue, payload);
+      if (preflight === "skip") {
+        continue;
+      }
+      if (preflight === "ack_stale") {
+        await ack(queue, msg.msg_id);
+        continue;
+      }
+
       const run = await createAgentRun({
         taskId,
         cell: queueCell(queue),

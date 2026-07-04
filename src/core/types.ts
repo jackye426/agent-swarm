@@ -37,11 +37,19 @@ export type CellType = "planning" | "design" | "engineering" | "verification" | 
 
 export type QueueJobType =
   | "task.plan.requested"
+  | "task.contract_revision.requested"
   | "task.design.requested"
   | "task.execution.requested"
   | "task.verification.requested"
   | "task.release.requested"
   | "task.rework.requested";
+
+export type VerificationFailureOwner =
+  | "implementation"
+  | "contract"
+  | "human_decision"
+  | "infrastructure"
+  | "unknown";
 
 // --- Contract types (mirrors contract.yaml) ---
 
@@ -140,6 +148,11 @@ export interface VerificationRecord {
   blocking_defects: string[];
   missing_evidence: string[];
   regression_risks: string[];
+  failure_owner?: VerificationFailureOwner | null;
+  failed_ac_ids?: string[];
+  failure_summary?: string | null;
+  recommended_next_step?: string | null;
+  question_for_user?: string | null;
   created_at: string;
 }
 

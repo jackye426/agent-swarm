@@ -8,6 +8,10 @@ export interface NotificationPayload {
   message?: string;
   errors?: string[];
   agent_run_id?: string;
+  failed_ac_ids?: string[];
+  failure_summary?: string;
+  recommended_next_step?: string;
+  question?: string;
 }
 
 // Formats a human_notification artifact into a Telegram message.
@@ -34,6 +38,41 @@ export function formatNotification(payload: NotificationPayload): string {
         `Check the contract_validation_failed artifact for details.`
       );
     }
+    case "waiting_on_dependency":
+      return (
+        `[WAITING] ${taskLink} - waiting on dependency\n` +
+        `*${payload.contract_title ?? ""}*\n` +
+        `${payload.message ?? "The contract is approved, but an upstream task is not complete yet."}`
+      );
+    case "verification_blocked":
+      return (
+        `[BLOCKED] ${taskLink} - verification blocked\n\n` +
+        `${payload.message ?? payload.failure_summary ?? "Verification could not complete."}`
+      );
+    case "contract_revision_requested":
+      return (
+        `[REVISION] ${taskLink} - contract revision requested\n\n` +
+        `${payload.message ?? "Verification found a contract issue."}\n\n` +
+        `Failed ACs: ${(payload.failed_ac_ids ?? []).join(", ") || "(not specified)"}`
+      );
+    case "human_input_required":
+      return (
+        `[INPUT NEEDED] ${taskLink}\n\n` +
+        `${payload.message ?? "Verification needs clarification."}\n\n` +
+        `${payload.question ?? "Please reply with the intended behavior."}\n\n` +
+        `Reply with /answer <your decision> to resolve this.`
+      );
+    case "dependency_unblocked":
+      return (
+        `▶️ ${taskLink} — dependency cleared\n` +
+        `${payload.message ?? "An upstream task completed; this task is now READY and starting."}`
+      );
+    case "infrastructure_blocked":
+      return (
+        `[OPS] ${taskLink} - infrastructure blocked\n\n` +
+        `${payload.message ?? "A credential, network, CI, or external-service issue blocked verification."}\n\n` +
+        `${payload.recommended_next_step ?? "Check runtime credentials and logs."}`
+      );
     case "task_complete":
       return (
         `🎉 ${taskLink} — COMPLETE\n\n` +

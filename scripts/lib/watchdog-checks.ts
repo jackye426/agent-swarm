@@ -15,6 +15,14 @@ export interface TaskRow {
   updated_at: string;
 }
 
+export interface AgentRunRow {
+  id: string;
+  task_id: string;
+  worker_type: string;
+  status: string;
+  started_at: string;
+}
+
 /** Task statuses that mean "a cell should be actively working on this". */
 const ACTIVE_STATUSES = new Set(["PLANNING", "IN_PROGRESS", "VERIFYING"]);
 
@@ -45,6 +53,29 @@ export function findStuckTasks(
           `Task *${task.id}* stuck in ${task.status} for ${minutes} min.\n` +
           `Check \`npm run smoke:inspect -- ${task.id}\`; if a verdict was saved but not applied, ` +
           `run \`npm run recover:verdict -- ${task.id}\`.`,
+      };
+    });
+}
+
+export function findStaleRunningAgentRuns(
+  runs: AgentRunRow[],
+  nowMs: number,
+  thresholdMs: number,
+): WatchdogAlert[] {
+  return runs
+    .filter(
+      (run) =>
+        run.status === "running" &&
+        nowMs - new Date(run.started_at).getTime() > thresholdMs,
+    )
+    .map((run) => {
+      const minutes = Math.round((nowMs - new Date(run.started_at).getTime()) / 60_000);
+      return {
+        key: `stale_run:${run.id}`,
+        message:
+          `Agent run *${run.id}* for *${run.task_id}* (${run.worker_type}) has been running for ${minutes} min.\n` +
+          `Check \`npm run smoke:inspect -- ${run.task_id}\`; for stale engineering/rework runs, ` +
+          `run \`npm run recover:stale-rework -- ${run.task_id} -- --inspect\` first.`,
       };
     });
 }

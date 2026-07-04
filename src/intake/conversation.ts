@@ -25,6 +25,8 @@ import { db } from "../db/client.js";
 import { invokeRoleModel, type RoleMessage } from "../core/model-router.js";
 import { parseRepoFullName, repoUrlFromFullName } from "../core/repo.js";
 import { getChatRepoBinding } from "../db/records.js";
+import { recordArtifact, recordDecision } from "../db/records.js";
+import { enqueue } from "../db/queue.js";
 import { createAndEnqueueTask, type CreatedTask } from "./task-creator.js";
 import { scanRepoSeedContext, type SeedRepoContext } from "./repo-scanner.js";
 
@@ -147,6 +149,14 @@ interface ConversationState {
   repo: string | null;
 }
 
+interface PendingHumanEscalation {
+  artifactId: string;
+  taskId: string;
+  question: string;
+  message: string;
+  failedAcIds: string[];
+}
+
 async function loadConversation(chatId: string): Promise<ConversationState> {
   try {
     // select("*") stays compatible if migration 007 hasn't been applied yet.
@@ -183,6 +193,129 @@ async function saveConversation(
     // Conversation continues in-memory for this turn; state just won't survive a restart.
     console.warn("[Conversation] Failed to persist state:", err);
   }
+}
+
+async function findPendingHumanEscalation(chatId: string): Promise<PendingHumanEscalation | null> {
+  const { data: tasks } = await db
+    .from("tasks")
+    .select("id, source_context, status")
+    .in("status", ["BLOCKED", "AWAITING_APPROVAL", "PLANNING"])
+    .order("updated_at", { ascending: false })
+    .limit(30);
+
+  const taskIds = ((tasks ?? []) as Array<{
+    id: string;
+    status: string;
+    source_context: Record<string, unknown> | null;
+  }>)
+    .filter((task) => task.source_context?.telegram_chat_id === chatId)
+    .map((task) => task.id);
+
+  if (taskIds.length === 0) return null;
+
+  const { data: artifacts } = await db
+    .from("artifacts")
+    .select("id, task_id, artifact_type, content, created_at")
+    .in("task_id", taskIds)
+    .in("artifact_type", ["human_notification", "coordinator_response"])
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  const rows = (artifacts ?? []) as Array<{
+    id: string;
+    task_id: string;
+    artifact_type: string;
+    content: Record<string, unknown> | null;
+  }>;
+
+  const answered = new Set(
+    rows
+      .filter((row) => row.artifact_type === "coordinator_response")
+      .map((row) => row.content?.escalation_artifact_id)
+      .filter((id): id is string => typeof id === "string"),
+  );
+
+  for (const row of rows) {
+    if (row.artifact_type !== "human_notification") continue;
+    if (answered.has(row.id)) continue;
+    if (row.content?.type !== "human_input_required") continue;
+    const failedAcIds = Array.isArray(row.content.failed_ac_ids)
+      ? row.content.failed_ac_ids.filter((id): id is string => typeof id === "string")
+      : [];
+    return {
+      artifactId: row.id,
+      taskId: row.task_id,
+      question: typeof row.content.question === "string" ? row.content.question : "",
+      message: typeof row.content.message === "string" ? row.content.message : "",
+      failedAcIds,
+    };
+  }
+
+  return null;
+}
+
+async function handleHumanEscalationReply(
+  chatId: string,
+  escalation: PendingHumanEscalation,
+  answer: string,
+  reply: (text: string) => Promise<unknown>,
+): Promise<void> {
+  await recordDecision({
+    taskId: escalation.taskId,
+    title: `Human clarification for ${escalation.taskId}`,
+    decision: answer,
+    rationale: `Answer to verification question: ${escalation.question || escalation.message}`,
+    madeBy: `telegram:${chatId}`,
+  });
+
+  await recordArtifact({
+    taskId: escalation.taskId,
+    artifactType: "coordinator_response",
+    content: {
+      escalation_artifact_id: escalation.artifactId,
+      chat_id: chatId,
+      answer,
+      question: escalation.question,
+      recorded_at: new Date().toISOString(),
+    },
+  });
+
+  await enqueue({
+    job_type: "task.contract_revision.requested",
+    task_id: escalation.taskId,
+    payload: {
+      task_id: escalation.taskId,
+      failed_ac_ids: escalation.failedAcIds,
+      failure_summary: escalation.message,
+      recommended_next_step: "Revise the contract using the product-owner clarification.",
+      question_for_user: escalation.question,
+      verifier_reason: `Product-owner clarification: ${answer}`,
+    },
+  });
+
+  await reply(`Got it. I recorded that clarification and sent ${escalation.taskId} back to planning.`);
+}
+
+/**
+ * Explicit /answer path — the ONLY way a chat message becomes a recorded
+ * product decision. Plain conversation must never be silently consumed as an
+ * escalation answer ("what's the status?" is not a contract clarification).
+ */
+export async function answerPendingEscalation(
+  chatId: string,
+  answer: string,
+  reply: (text: string) => Promise<unknown>,
+): Promise<void> {
+  if (!answer.trim()) {
+    await reply("Usage: /answer <your decision>");
+    return;
+  }
+  const pending = await findPendingHumanEscalation(chatId).catch(() => null);
+  if (!pending) {
+    await reply("No task is currently waiting on your input.");
+    return;
+  }
+  await handleHumanEscalationReply(chatId, pending, answer.trim(), reply);
 }
 
 /** /reset — restart the conversation but keep project notes and repo. */
@@ -355,6 +488,19 @@ export async function handleConversationMessage(
 ): Promise<void> {
   const state = await loadConversation(chatId);
   const userMessage: RoleMessage = { role: "user", content: text };
+
+  // A pending escalation does NOT consume plain messages — answering is
+  // explicit via /answer. Remind once per turn so the blocked task isn't
+  // forgotten, then continue the normal conversation.
+  const pendingEscalation = await findPendingHumanEscalation(chatId).catch(() => null);
+  if (pendingEscalation) {
+    await reply(
+      `(Heads up: ${pendingEscalation.taskId} is waiting on your input — ` +
+        `"${(pendingEscalation.question || pendingEscalation.message).slice(0, 150)}" — ` +
+        `reply with /answer <your decision> when ready.)`,
+    );
+  }
+
   const { repos, chatDefault } = await knownRepos(chatId);
 
   // Ground the conversation in the settled repo (or the chat default).

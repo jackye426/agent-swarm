@@ -418,7 +418,9 @@ async function invokeClaudeCode(state: S): Promise<Partial<S>> {
       state.implementationPlan,
     ].join("\n");
 
-    const planFile = path.join(state.worktreePath, ".taskgraph_impl_plan.txt");
+    const promptDir = path.join(os.tmpdir(), "taskgraph-os-prompts", state.taskId);
+    await mkdir(promptDir, { recursive: true });
+    const planFile = path.join(promptDir, `${state.agentRunId ?? "run"}.txt`);
     await writeFile(planFile, authorizedPrompt, "utf8");
 
     const shellCmd = process.platform === "win32"

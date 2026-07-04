@@ -1,4 +1,10 @@
-import type { CriterionVerdict, EvidenceRecord, TaskContract, TaskVerdict } from "./types.js";
+import type {
+  CriterionVerdict,
+  EvidenceRecord,
+  TaskContract,
+  TaskVerdict,
+  VerificationFailureOwner,
+} from "./types.js";
 import {
   classifyAcceptanceCriterion,
   primaryAcKind,
@@ -71,5 +77,14 @@ export function deriveTaskVerdict(input: {
   if (values.length === 0 || values.some((value) => value === "INCONCLUSIVE")) return "BLOCKED";
   if (input.missingEvidence.length > 0) return "REWORK_REQUIRED";
   if (values.every((value) => value === "PASS" || value === "NOT_APPLICABLE")) return "COMPLETE";
+  return "BLOCKED";
+}
+
+export function routeVerdictByFailureOwner(
+  verdict: TaskVerdict,
+  owner: VerificationFailureOwner,
+): TaskVerdict {
+  if (verdict === "COMPLETE" || verdict === "CANCELLED") return verdict;
+  if (owner === "implementation") return "REWORK_REQUIRED";
   return "BLOCKED";
 }

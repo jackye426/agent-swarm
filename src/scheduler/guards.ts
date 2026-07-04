@@ -5,6 +5,11 @@ export function isStalePlanningJob(status: TaskStatus): boolean {
   return status !== "DRAFT" && status !== "PLANNING";
 }
 
+/** Contract revision jobs repair verifier-found contract defects from BLOCKED. */
+export function isStaleContractRevisionJob(status: TaskStatus): boolean {
+  return status !== "BLOCKED";
+}
+
 /** Execution jobs are stale when the task is not READY. */
 export function isStaleExecutionJob(status: TaskStatus): boolean {
   return status !== "READY";

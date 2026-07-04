@@ -8,6 +8,7 @@ import type { QueueJobType } from "../src/core/types.js";
 const ArgsSchema = z.object({
   queue: z.enum([
     "task.plan.requested",
+    "task.contract_revision.requested",
     "task.design.requested",
     "task.execution.requested",
     "task.verification.requested",

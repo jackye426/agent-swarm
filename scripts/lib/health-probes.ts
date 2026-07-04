@@ -46,6 +46,7 @@ export interface SupabaseProbeClient {
 
 const QUEUES: QueueJobType[] = [
   "task.plan.requested",
+  "task.contract_revision.requested",
   "task.design.requested",
   "task.execution.requested",
   "task.verification.requested",

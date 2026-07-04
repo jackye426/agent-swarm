@@ -28,10 +28,12 @@ import type { QueueJobType } from "../src/core/types.js";
 import { defaultHealthProbeDeps, probeOpenRouter } from "./lib/health-probes.js";
 import {
   AlertDeduper,
+  findStaleRunningAgentRuns,
   evaluateDiskFree,
   evaluateQueueDepth,
   findCredentialFailures,
   findStuckTasks,
+  type AgentRunRow,
   type FailureEventRow,
   type QueueDepthRow,
   type TaskRow,
@@ -47,6 +49,7 @@ const MIN_FREE_DISK_GB = Number(process.env.WATCHDOG_MIN_FREE_DISK_GB ?? 5);
 
 const QUEUES: QueueJobType[] = [
   "task.plan.requested",
+  "task.contract_revision.requested",
   "task.execution.requested",
   "task.verification.requested",
   "task.rework.requested",
@@ -82,6 +85,15 @@ async function checkStuckTasks(nowMs: number): Promise<WatchdogAlert[]> {
   return findStuckTasks(data as TaskRow[], nowMs, STUCK_TASK_MS);
 }
 
+async function checkStaleAgentRuns(nowMs: number): Promise<WatchdogAlert[]> {
+  const { data, error } = await db
+    .from("agent_runs")
+    .select("id, task_id, worker_type, status, started_at")
+    .eq("status", "running");
+  if (error || !data) return [];
+  return findStaleRunningAgentRuns(data as AgentRunRow[], nowMs, STUCK_TASK_MS);
+}
+
 async function checkCredentialFailures(): Promise<WatchdogAlert[]> {
   // Look back one re-alert window so a failure isn't missed between cycles
   // but also doesn't alert forever.
@@ -90,7 +102,7 @@ async function checkCredentialFailures(): Promise<WatchdogAlert[]> {
     .from("task_events")
     .select("task_id, payload")
     .eq("event_type", "agent_run_failed")
-    .gte("created_at", since);
+    .gte("occurred_at", since);
   if (error || !data) return [];
   return findCredentialFailures(data as FailureEventRow[]);
 }
@@ -142,6 +154,7 @@ export async function runCycle(): Promise<WatchdogAlert[]> {
   const alerts = (
     await Promise.all([
       checkInfrastructure(),
+      checkStaleAgentRuns(nowMs),
       checkStuckTasks(nowMs),
       checkCredentialFailures(),
       checkQueueDepth(),

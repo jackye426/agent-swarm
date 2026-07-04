@@ -29,3 +29,47 @@ test("formatNotification formats contract_auto_approved", () => {
   assert.match(message, /contract auto-approved/);
   assert.match(message, /READY for engineering/);
 });
+
+test("formatNotification formats human input requests", () => {
+  const message = formatNotification({
+    type: "human_input_required",
+    task_id: "T-011",
+    message: "AC-10 is ambiguous.",
+    question: "Should runtime data be ignored and created on startup?",
+  });
+
+  assert.match(message, /INPUT NEEDED/);
+  assert.match(message, /AC-10 is ambiguous/);
+  assert.match(message, /runtime data/);
+});
+
+test("formatNotification formats contract revision routing", () => {
+  const message = formatNotification({
+    type: "contract_revision_requested",
+    task_id: "T-011",
+    failed_ac_ids: ["AC-10"],
+    message: "Planning will repair the contract.",
+  });
+
+  assert.match(message, /contract revision requested/);
+  assert.match(message, /AC-10/);
+});
+
+test("formatNotification teaches /answer on human input requests", () => {
+  const message = formatNotification({
+    type: "human_input_required",
+    task_id: "T-011",
+    question: "Which behavior do you want?",
+  });
+  assert.match(message, /\/answer <your decision>/);
+});
+
+test("formatNotification formats dependency_unblocked", () => {
+  const message = formatNotification({
+    type: "dependency_unblocked",
+    task_id: "T-012",
+    message: "T-012 was waiting on T-011, which is now COMPLETE.",
+  });
+  assert.match(message, /dependency cleared/);
+  assert.match(message, /T-011/);
+});

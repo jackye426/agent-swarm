@@ -1,6 +1,7 @@
 /** Shared worker_type strings for agent_runs — must stay in sync across scheduler and DB queries. */
 
 export const WORKER_TYPE_PLANNING = "planning-cell";
+export const WORKER_TYPE_CONTRACT_REVISION = "contract-revision-cell";
 export const WORKER_TYPE_ENGINEERING = "engineering-cell";
 export const WORKER_TYPE_VERIFICATION = "verification-cell";
 export const WORKER_TYPE_DESIGN = "design-cell";
@@ -9,6 +10,7 @@ export const WORKER_TYPE_REWORK = "rework-cell";
 
 export const WORKER_TYPE_BY_QUEUE = {
   "task.plan.requested": WORKER_TYPE_PLANNING,
+  "task.contract_revision.requested": WORKER_TYPE_CONTRACT_REVISION,
   "task.execution.requested": WORKER_TYPE_ENGINEERING,
   "task.verification.requested": WORKER_TYPE_VERIFICATION,
   "task.design.requested": WORKER_TYPE_DESIGN,

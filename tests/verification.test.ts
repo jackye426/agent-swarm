@@ -5,6 +5,7 @@ import { TaskContractSchema } from "../src/core/schemas.js";
 import {
   computeEffectiveMissingEvidence,
   deriveTaskVerdict,
+  routeVerdictByFailureOwner,
 } from "../src/core/verification.js";
 
 const baseContract = TaskContractSchema.parse({
@@ -126,4 +127,12 @@ test("blocking defects yield REWORK_REQUIRED regardless of verdicts", () => {
     }),
     "REWORK_REQUIRED",
   );
+});
+
+test("verification routing sends implementation defects to rework", () => {
+  assert.equal(routeVerdictByFailureOwner("BLOCKED", "implementation"), "REWORK_REQUIRED");
+});
+
+test("verification routing sends contract ambiguity to blocked planning route", () => {
+  assert.equal(routeVerdictByFailureOwner("BLOCKED", "contract"), "BLOCKED");
 });

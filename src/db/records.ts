@@ -6,6 +6,7 @@ import type {
   EvidenceRecord,
   TaskContract,
   TaskVerdict,
+  VerificationFailureOwner,
 } from "../core/types.js";
 import {
   buildExecutionReadyPacket,
@@ -285,6 +286,11 @@ export interface RecordVerificationInput {
   missingEvidence: string[];
   regressionRisks: string[];
   criterionVerdicts: Record<string, CriterionVerdict>;
+  failureOwner?: VerificationFailureOwner;
+  failedAcIds?: string[];
+  failureSummary?: string;
+  recommendedNextStep?: string;
+  questionForUser?: string;
 }
 
 export async function recordVerification(input: RecordVerificationInput): Promise<string> {
@@ -298,6 +304,11 @@ export async function recordVerification(input: RecordVerificationInput): Promis
       missing_evidence: input.missingEvidence,
       regression_risks: input.regressionRisks,
       criterion_verdicts: input.criterionVerdicts,
+      failure_owner: input.failureOwner ?? null,
+      failed_ac_ids: input.failedAcIds ?? [],
+      failure_summary: input.failureSummary ?? null,
+      recommended_next_step: input.recommendedNextStep ?? null,
+      question_for_user: input.questionForUser ?? null,
     })
     .select("id")
     .single();
@@ -311,6 +322,11 @@ export interface LatestVerificationRecord {
   blockingDefects: string[];
   missingEvidence: string[];
   criterionVerdicts: Record<string, CriterionVerdict>;
+  failureOwner?: VerificationFailureOwner | null;
+  failedAcIds?: string[];
+  failureSummary?: string | null;
+  recommendedNextStep?: string | null;
+  questionForUser?: string | null;
 }
 
 export async function getLatestVerificationRecord(
@@ -318,7 +334,7 @@ export async function getLatestVerificationRecord(
 ): Promise<LatestVerificationRecord | null> {
   const { data, error } = await db
     .from("verification_records")
-    .select("verdict, blocking_defects, missing_evidence, criterion_verdicts")
+    .select("verdict, blocking_defects, missing_evidence, criterion_verdicts, failure_owner, failed_ac_ids, failure_summary, recommended_next_step, question_for_user")
     .eq("task_id", taskId)
     .order("created_at", { ascending: false })
     .limit(1)
@@ -332,6 +348,11 @@ export async function getLatestVerificationRecord(
     blocking_defects: string[];
     missing_evidence: string[];
     criterion_verdicts: Record<string, CriterionVerdict>;
+    failure_owner?: VerificationFailureOwner | null;
+    failed_ac_ids?: string[] | null;
+    failure_summary?: string | null;
+    recommended_next_step?: string | null;
+    question_for_user?: string | null;
   };
 
   return {
@@ -339,6 +360,11 @@ export async function getLatestVerificationRecord(
     blockingDefects: row.blocking_defects ?? [],
     missingEvidence: row.missing_evidence ?? [],
     criterionVerdicts: row.criterion_verdicts ?? {},
+    failureOwner: row.failure_owner ?? null,
+    failedAcIds: row.failed_ac_ids ?? [],
+    failureSummary: row.failure_summary ?? null,
+    recommendedNextStep: row.recommended_next_step ?? null,
+    questionForUser: row.question_for_user ?? null,
   };
 }
 
@@ -441,6 +467,16 @@ export async function dependenciesComplete(taskId: string): Promise<boolean> {
   const { data, error } = await db.rpc("task_dependencies_complete", { p_task_id: taskId });
   assertNoError(error, `Failed to check dependencies for ${taskId}`);
   return Boolean(data);
+}
+
+/** Tasks that declare `taskId` as a dependency (i.e. are waiting on it). */
+export async function getDependentTaskIds(taskId: string): Promise<string[]> {
+  const { data, error } = await db
+    .from("task_dependencies")
+    .select("task_id")
+    .eq("depends_on_id", taskId);
+  assertNoError(error, `Failed to load dependents of ${taskId}`);
+  return ((data ?? []) as Array<{ task_id: string }>).map((row) => row.task_id);
 }
 
 export async function getChatRepoBinding(chatId: string): Promise<string | null> {

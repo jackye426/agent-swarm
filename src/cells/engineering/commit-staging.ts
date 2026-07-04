@@ -2,16 +2,13 @@ import path from "node:path";
 import { rm } from "node:fs/promises";
 import { runCommand } from "../../core/command.js";
 import {
-  commitExcludedPaths,
   fileMatchesScopeOutItem,
   filterExcludedCommitPaths,
   isExcludedCommitPath,
 } from "./commit-guard.js";
 
 export async function removeExcludedFilesFromDisk(worktreePath: string, taskId: string): Promise<void> {
-  for (const rel of commitExcludedPaths(taskId)) {
-    await rm(path.join(worktreePath, rel), { force: true });
-  }
+  await rm(path.join(worktreePath, "tasks", taskId, "evidence"), { recursive: true, force: true });
 }
 
 async function listCachedPaths(worktreePath: string): Promise<string[]> {

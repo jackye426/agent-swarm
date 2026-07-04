@@ -28,6 +28,8 @@ import {
 
   getLatestContextPacket,
 
+  getLatestContract,
+
   publishContractVersion,
 
   recordApproval,
@@ -39,6 +41,8 @@ import {
 import { enqueue } from "../../db/queue.js";
 
 import { transitionTaskStatus } from "../../db/tasks.js";
+
+import { enqueueVerificationForTask } from "../../../scripts/lib/verification-enqueue.js";
 
 
 
@@ -688,7 +692,11 @@ ${compactContext(state)}`,
 
 
 
-async function finalizeAutoApproval(state: S, contract: TaskContract): Promise<Partial<S>> {
+async function finalizeAutoApproval(
+  state: S,
+  contract: TaskContract,
+  options: { enqueueExecution?: boolean; enqueueVerification?: boolean } = {},
+): Promise<Partial<S>> {
 
   const packet = (await getLatestContextPacket(state.taskId)) ?? {};
 
@@ -699,36 +707,6 @@ async function finalizeAutoApproval(state: S, contract: TaskContract): Promise<P
 
 
   await enrichExecutionContextPacket(state.taskId, contract, packet, executability);
-
-
-
-  await recordArtifact({
-
-    taskId: state.taskId,
-
-    artifactType: "human_notification",
-
-    content: {
-
-      type: "contract_auto_approved",
-
-      task_id: state.taskId,
-
-      contract_title: contract.title,
-
-      draft_contract: contract,
-
-      message: "Draft contract auto-approved by planning cell after multi-agent review and executability validation.",
-
-      executability_warnings: executability.warnings,
-
-      agent_run_id: state.agentRunId,
-
-      notified_at: new Date().toISOString(),
-
-    },
-
-  });
 
 
 
@@ -766,25 +744,78 @@ async function finalizeAutoApproval(state: S, contract: TaskContract): Promise<P
 
 
 
-  await transitionTaskStatus({
+  const depsComplete = await dependenciesComplete(state.taskId);
+
+  try {
+    await transitionTaskStatus({
+
+      taskId: state.taskId,
+
+      to: "READY",
+
+      actor: "planning-cell",
+
+      payload: { agent_run_id: state.agentRunId, auto_approved: true },
+
+      readiness: {
+
+        contractValid: true,
+
+        dependenciesComplete: depsComplete,
+
+        approvalsComplete: true,
+
+        contextPacketAvailable: true,
+
+      },
+
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!depsComplete || message.includes("dependencies must be COMPLETE")) {
+      await recordArtifact({
+        taskId: state.taskId,
+        artifactType: "human_notification",
+        content: {
+          type: "waiting_on_dependency",
+          task_id: state.taskId,
+          contract_title: contract.title,
+          message:
+            `${state.taskId} contract is approved, but it cannot start yet because ` +
+            "one or more upstream dependencies are not COMPLETE.",
+          agent_run_id: state.agentRunId,
+          notified_at: new Date().toISOString(),
+        },
+      });
+      console.log(`[Planning Cell] ${state.taskId} approved but waiting on dependencies`);
+      return { draftContract: contract };
+    }
+    throw err;
+  }
+
+  await recordArtifact({
 
     taskId: state.taskId,
 
-    to: "READY",
+    artifactType: "human_notification",
 
-    actor: "planning-cell",
+    content: {
 
-    payload: { agent_run_id: state.agentRunId, auto_approved: true },
+      type: "contract_auto_approved",
 
-    readiness: {
+      task_id: state.taskId,
 
-      contractValid: true,
+      contract_title: contract.title,
 
-      dependenciesComplete: await dependenciesComplete(state.taskId),
+      draft_contract: contract,
 
-      approvalsComplete: true,
+      message: "Draft contract auto-approved by planning cell after multi-agent review and executability validation.",
 
-      contextPacketAvailable: true,
+      executability_warnings: executability.warnings,
+
+      agent_run_id: state.agentRunId,
+
+      notified_at: new Date().toISOString(),
 
     },
 
@@ -794,7 +825,19 @@ async function finalizeAutoApproval(state: S, contract: TaskContract): Promise<P
 
   console.log(`[Planning Cell] Contract auto-approved for ${state.taskId}: ${contract.title}`);
 
-  if (process.env.TASKGRAPH_AUTO_ENQUEUE_EXECUTION === "true") {
+  if (options.enqueueVerification) {
+    await transitionTaskStatus({
+      taskId: state.taskId,
+      to: "AWAITING_EVIDENCE",
+      actor: "planning-cell",
+      payload: {
+        agent_run_id: state.agentRunId,
+        reason: "re-verify existing implementation after contract revision",
+      },
+    });
+    await enqueueVerificationForTask(state.taskId);
+    console.log(`[Planning Cell] Auto-enqueued verification after contract revision for ${state.taskId}`);
+  } else if ((options.enqueueExecution ?? true) && process.env.TASKGRAPH_AUTO_ENQUEUE_EXECUTION === "true") {
     await enqueue({
       job_type: "task.execution.requested",
       task_id: state.taskId,
@@ -931,6 +974,194 @@ async function autoApproveContract(state: S): Promise<Partial<S>> {
 
   return finalizeAutoApproval(state, contract);
 
+}
+
+export interface ReviseContractFromVerificationInput {
+  taskId: string;
+  agentRunId: string;
+  failedAcIds: string[];
+  failureSummary: string;
+  recommendedNextStep: string;
+  questionForUser?: string;
+  verifierReason: string;
+}
+
+export async function reviseContractFromVerification(
+  input: ReviseContractFromVerificationInput,
+): Promise<{ error?: string }> {
+  await transitionTaskStatus({
+    taskId: input.taskId,
+    to: "PLANNING",
+    actor: "planning-cell",
+    payload: {
+      agent_run_id: input.agentRunId,
+      reason: "contract revision requested by verification",
+      failed_ac_ids: input.failedAcIds,
+    },
+  });
+
+  const currentContract = await getLatestContract(input.taskId);
+  const packet = (await getLatestContextPacket(input.taskId)) ?? {};
+
+  const response = await invokeRoleModel("contract_revision", [
+    {
+      role: "system",
+      content: `You are revising a task contract after independent verification found a contract/planning defect.
+Revise ONLY the flawed acceptance criteria or related scope/constraints needed to remove the defect.
+Preserve valid completed work, the task id, the user goal, approvals_required, rollback shape, and executable verification methods.
+If the defect resembles "a runtime data file must be both committed and gitignored", prefer:
+- commit a directory placeholder such as data/.gitkeep
+- gitignore the runtime data file
+- require the application to create the runtime data file with [] when missing
+Return ONLY the full revised contract JSON object, no markdown fences.`,
+    },
+    {
+      role: "user",
+      content: `Task: ${input.taskId}
+
+Failed AC ids:
+${input.failedAcIds.map((id) => `- ${id}`).join("\n") || "(none specified)"}
+
+Verifier failure summary:
+${input.failureSummary || "(none)"}
+
+Recommended next step:
+${input.recommendedNextStep || "(none)"}
+
+Question for user, if any:
+${input.questionForUser ?? "(none)"}
+
+Verifier reason:
+${input.verifierReason || "(none)"}
+
+Current contract:
+${JSON.stringify(currentContract, null, 2)}
+
+Latest context packet:
+${JSON.stringify(packet, null, 2)}`,
+    },
+  ], { temperature: 0.1, responseFormat: "json_object" });
+
+  // A failed revision must not strand the task in PLANNING: transition back to
+  // BLOCKED (so a re-enqueued revision job is not stale-acked) and notify the
+  // human. Returning an error instead would retry via the visibility timeout,
+  // find the task in PLANNING, and silently ack the job as stale.
+  const failRevision = async (reason: string): Promise<{ error?: string }> => {
+    await recordArtifact({
+      taskId: input.taskId,
+      artifactType: "contract_revision_failed",
+      content: { agent_run_id: input.agentRunId, reason, failed_ac_ids: input.failedAcIds },
+    });
+    await recordArtifact({
+      taskId: input.taskId,
+      artifactType: "human_notification",
+      content: {
+        type: "contract_validation_failed",
+        task_id: input.taskId,
+        errors: [reason],
+        message: `Contract revision for ${input.taskId} failed: ${reason}. Task returned to BLOCKED for human review.`,
+        agent_run_id: input.agentRunId,
+        notified_at: new Date().toISOString(),
+      },
+    });
+    await transitionTaskStatus({
+      taskId: input.taskId,
+      to: "BLOCKED",
+      actor: "planning-cell",
+      payload: { agent_run_id: input.agentRunId, reason },
+    });
+    return {};
+  };
+
+  let revised: TaskContract;
+  try {
+    const json = JSON.parse(response);
+    const parsed = TaskContractSchema.safeParse(json);
+    if (!parsed.success) {
+      return failRevision(
+        `Revision failed schema validation: ${parsed.error.issues
+          .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+          .join("; ")}`,
+      );
+    }
+    revised = parsed.data;
+  } catch (err) {
+    return failRevision(`Failed to parse contract revision JSON: ${(err as Error).message}`);
+  }
+
+  // The original approval path gates on executability — a revision must not
+  // bypass it, or the exact defect class this loop exists to fix (unverifiable
+  // ACs) can be reintroduced by the revision itself.
+  const revisedExecutability = validateContractExecutability(
+    revised,
+    executabilityContextFromPacket(packet),
+  );
+  if (!revisedExecutability.ok) {
+    return failRevision(
+      `Revised contract failed executability validation: ${revisedExecutability.errors.join("; ")}`,
+    );
+  }
+
+  await recordArtifact({
+    taskId: input.taskId,
+    artifactType: "contract_revision",
+    content: {
+      agent_run_id: input.agentRunId,
+      failed_ac_ids: input.failedAcIds,
+      failure_summary: input.failureSummary,
+      recommended_next_step: input.recommendedNextStep,
+      verifier_reason: input.verifierReason,
+      revised_contract: revised,
+    },
+  });
+
+  await transitionTaskStatus({
+    taskId: input.taskId,
+    to: "AWAITING_APPROVAL",
+    actor: "planning-cell",
+    payload: {
+      agent_run_id: input.agentRunId,
+      reason: "contract revision drafted",
+      failed_ac_ids: input.failedAcIds,
+    },
+  });
+
+  await recordArtifact({
+    taskId: input.taskId,
+    artifactType: "human_notification",
+    content: {
+      type: "contract_revision_requested",
+      task_id: input.taskId,
+      contract_title: revised.title,
+      failed_ac_ids: input.failedAcIds,
+      message:
+        `Verification found a contract issue and planning revised the contract. ` +
+        "Re-running verification against the existing implementation.",
+      agent_run_id: input.agentRunId,
+      notified_at: new Date().toISOString(),
+    },
+  });
+
+  const result = await finalizeAutoApproval(
+    {
+      taskId: input.taskId,
+      agentRunId: input.agentRunId,
+      goal: revised.goal,
+      context: JSON.stringify(packet),
+      stopAfterDraft: false,
+      planA: null,
+      planB: null,
+      planAReview: null,
+      planBReview: null,
+      consensus: null,
+      draftContract: revised,
+      error: null,
+    },
+    revised,
+    { enqueueExecution: false, enqueueVerification: true },
+  );
+
+  return result.error ? { error: result.error } : {};
 }
 
 
@@ -1070,5 +1301,3 @@ export async function getPlanningWorkflow(): Promise<ReturnType<typeof graph.com
   return _workflow;
 
 }
-
-

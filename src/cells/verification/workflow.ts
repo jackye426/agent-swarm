@@ -1,21 +1,31 @@
 import { StateGraph, Annotation } from "@langchain/langgraph";
-import type { CriterionVerdict, EvidenceRecord, TaskContract, TaskVerdict } from "../../core/types.js";
+import type {
+  CriterionVerdict,
+  EvidenceRecord,
+  TaskContract,
+  TaskVerdict,
+  VerificationFailureOwner,
+} from "../../core/types.js";
 import {
   computeEffectiveMissingEvidence,
   deriveTaskVerdict,
   findMissingEvidence,
+  routeVerdictByFailureOwner,
 } from "../../core/verification.js";
 import { classifyVerificationMethod } from "../../core/contract-executability.js";
 import { invokeRoleModel } from "../../core/model-router.js";
 import { readKnowledgeExcerpt } from "../../core/knowledge-excerpt.js";
 import {
+  dependenciesComplete,
+  getDependentTaskIds,
+  getLatestContract,
   getReworkAttemptCount,
   recordArtifact,
   recordVerification,
   requiredApprovalsRecorded,
 } from "../../db/records.js";
 import { enqueue } from "../../db/queue.js";
-import { getTaskStatus, transitionTaskStatusIfLegal } from "../../db/tasks.js";
+import { getTaskStatus, transitionTaskStatus, transitionTaskStatusIfLegal } from "../../db/tasks.js";
 
 const VerificationState = Annotation.Root({
   taskId: Annotation<string>(),
@@ -29,6 +39,11 @@ const VerificationState = Annotation.Root({
   blockingDefects: Annotation<string[]>({ default: () => [], reducer: (_, v) => v }),
   missingEvidence: Annotation<string[]>({ default: () => [], reducer: (_, v) => v }),
   regressionRisks: Annotation<string[]>({ default: () => [], reducer: (_, v) => v }),
+  failureOwner: Annotation<VerificationFailureOwner | null>({ default: () => null, reducer: (_, v) => v }),
+  failedAcIds: Annotation<string[]>({ default: () => [], reducer: (_, v) => v }),
+  failureSummary: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
+  recommendedNextStep: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
+  questionForUser: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
   verdict: Annotation<TaskVerdict | null>({ default: () => null, reducer: (_, v) => v }),
   error: Annotation<string | null>({ default: () => null, reducer: (_, v) => v }),
 });
@@ -53,6 +68,11 @@ function parseReviewJson(content: string): {
   criterion_verdicts?: Record<string, CriterionVerdict>;
   blocking_defects?: string[];
   regression_risks?: string[];
+  failure_owner?: VerificationFailureOwner;
+  failed_ac_ids?: string[];
+  failure_summary?: string;
+  recommended_next_step?: string;
+  question_for_user?: string;
 } {
   const trimmed = content.trim();
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -84,8 +104,14 @@ async function runModelReview(state: S): Promise<Partial<S>> {
     {
       role: "system",
       content: `You are an independent code verifier. You did not implement this work.
-Return only JSON with: {"criterion_verdicts":{"AC-1":"PASS"},"blocking_defects":[],"regression_risks":[]}.
+Return only JSON with: {"criterion_verdicts":{"AC-1":"PASS"},"blocking_defects":[],"regression_risks":[],"failure_owner":"implementation","failed_ac_ids":["AC-1"],"failure_summary":"...","recommended_next_step":"...","question_for_user":"..."}.
 Use PASS, FAIL, INCONCLUSIVE, or NOT_APPLICABLE for every acceptance criterion.
+failure_owner must be one of: implementation, contract, human_decision, infrastructure, unknown.
+Use implementation when code/tests should be reworked.
+Use contract when the acceptance criterion, scope, or evidence requirement is contradictory, vague, or impossible to satisfy.
+Use human_decision only when the product owner must choose behavior.
+Use infrastructure for credentials, network, CI, dependency installation, or external service failures.
+Use unknown when you cannot confidently classify the owner.
 
 ${judgingRules}`,
     },
@@ -125,6 +151,11 @@ ${state.prDiff}`,
       criterionVerdicts: json.criterion_verdicts ?? {},
       blockingDefects: json.blocking_defects ?? [],
       regressionRisks: json.regression_risks ?? [],
+      failureOwner: normalizeFailureOwner(json.failure_owner),
+      failedAcIds: normalizeFailedAcIds(json.failed_ac_ids),
+      failureSummary: json.failure_summary ?? null,
+      recommendedNextStep: json.recommended_next_step ?? null,
+      questionForUser: json.question_for_user ?? null,
     };
   } catch (err) {
     return {
@@ -133,8 +164,26 @@ ${state.prDiff}`,
       criterionVerdicts: Object.fromEntries(
         state.contract.acceptance_criteria.map((ac) => [ac.id, "INCONCLUSIVE" as CriterionVerdict])
       ),
+      failureOwner: "unknown",
+      failureSummary: "Verifier response could not be parsed.",
+      recommendedNextStep: "Escalate to the coordinator for inspection.",
     };
   }
+}
+
+function normalizeFailureOwner(value: unknown): VerificationFailureOwner | null {
+  return value === "implementation" ||
+    value === "contract" ||
+    value === "human_decision" ||
+    value === "infrastructure" ||
+    value === "unknown"
+    ? value
+    : null;
+}
+
+function normalizeFailedAcIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && /^AC-\d+$/.test(item));
 }
 
 async function mapEvidenceToCriteria(state: S): Promise<Partial<S>> {
@@ -180,16 +229,119 @@ async function deriveVerdict(state: S): Promise<Partial<S>> {
   };
 }
 
+function failedAcIdsFromVerdicts(verdicts: Record<string, CriterionVerdict>): string[] {
+  return Object.entries(verdicts)
+    .filter(([, verdict]) => verdict === "FAIL" || verdict === "INCONCLUSIVE")
+    .map(([id]) => id);
+}
+
+function inferFailureOwner(state: S): VerificationFailureOwner {
+  if (state.failureOwner) return state.failureOwner;
+  if (state.blockingDefects.length > 0) return "implementation";
+  // Missing evidence with no verifier classification: default to the rework
+  // loop (pre-routing behavior). Routing it to "unknown" would park a
+  // previously self-healing case as BLOCKED awaiting a human.
+  if (state.missingEvidence.length > 0) return "implementation";
+  const values = Object.values(state.criterionVerdicts);
+  if (values.some((value) => value === "FAIL")) return "implementation";
+  if (values.some((value) => value === "INCONCLUSIVE")) return "unknown";
+  return "unknown";
+}
+
+/**
+ * Promote dependents of a just-completed task. Tasks that hit the
+ * waiting_on_dependency path were approved (contract published, approvals
+ * recorded) but parked at AWAITING_APPROVAL with their queue message acked —
+ * nothing retries them, so the completing task must wake them.
+ */
+async function wakeDependentTasks(completedTaskId: string, agentRunId: string | null): Promise<void> {
+  let dependents: string[] = [];
+  try {
+    dependents = await getDependentTaskIds(completedTaskId);
+  } catch (err) {
+    console.warn(`[Verification Cell] Failed to load dependents of ${completedTaskId}:`, err);
+    return;
+  }
+
+  for (const dependentId of dependents) {
+    try {
+      if ((await getTaskStatus(dependentId)) !== "AWAITING_APPROVAL") continue;
+      if (!(await dependenciesComplete(dependentId))) continue;
+
+      const contract = await getLatestContract(dependentId);
+      await transitionTaskStatus({
+        taskId: dependentId,
+        to: "READY",
+        actor: "verification-cell",
+        payload: {
+          reason: `dependency ${completedTaskId} completed`,
+          agent_run_id: agentRunId,
+        },
+        readiness: {
+          contractValid: true,
+          dependenciesComplete: true,
+          approvalsComplete: await requiredApprovalsRecorded(dependentId, contract.approvals_required),
+          contextPacketAvailable: true,
+        },
+      });
+
+      await recordArtifact({
+        taskId: dependentId,
+        artifactType: "human_notification",
+        content: {
+          type: "dependency_unblocked",
+          task_id: dependentId,
+          message:
+            `${dependentId} was waiting on ${completedTaskId}, which is now COMPLETE. ` +
+            `${dependentId} is READY and starting.`,
+          notified_at: new Date().toISOString(),
+        },
+      });
+
+      if (process.env.TASKGRAPH_AUTO_ENQUEUE_EXECUTION === "true") {
+        await enqueue({
+          job_type: "task.execution.requested",
+          task_id: dependentId,
+          payload: { task_id: dependentId },
+        });
+      }
+      console.log(`[Verification Cell] Woke dependent ${dependentId} after ${completedTaskId} completed`);
+    } catch (err) {
+      // One bad dependent must not fail the completing task's verification.
+      console.error(`[Verification Cell] Failed to wake dependent ${dependentId}:`, err);
+    }
+  }
+}
+
 async function publishVerificationRecord(state: S): Promise<Partial<S>> {
   if (!state.verdict) return { error: "Cannot publish verification without a verdict" };
   if (!state.agentRunId) return { error: "Cannot publish verification without an agent run id" };
 
+  const failureOwner = inferFailureOwner(state);
+  const failedAcIds = state.failedAcIds.length > 0
+    ? state.failedAcIds
+    : failedAcIdsFromVerdicts(state.criterionVerdicts);
+  const failureSummary =
+    state.failureSummary ??
+    ([
+      state.blockingDefects.length > 0 ? `Blocking defects: ${state.blockingDefects.join("; ")}` : "",
+      state.missingEvidence.length > 0 ? `Missing evidence: ${state.missingEvidence.join("; ")}` : "",
+    ].filter(Boolean).join("\n") ||
+      "Verification did not pass.");
+  const recommendedNextStep =
+    state.recommendedNextStep ??
+    (failureOwner === "contract"
+      ? "Revise the contract and re-run verification."
+      : failureOwner === "implementation"
+        ? "Rework the implementation and re-run verification."
+        : "Escalate to the coordinator for clarification.");
+
   // When the verifier wants REWORK_REQUIRED, check if we've hit the cap.
   // If so, escalate to BLOCKED (which is legal from VERIFYING) instead.
   const MAX_REWORK = Number(process.env.TASKGRAPH_MAX_REWORK_ATTEMPTS ?? 3);
-  let effectiveVerdict = state.verdict;
+  let effectiveVerdict = routeVerdictByFailureOwner(state.verdict, failureOwner);
   let reworkAttemptsDone = 0;
-  if (state.verdict === "REWORK_REQUIRED") {
+  if (effectiveVerdict === "REWORK_REQUIRED") {
     reworkAttemptsDone = await getReworkAttemptCount(state.taskId);
     if (reworkAttemptsDone >= MAX_REWORK) {
       effectiveVerdict = "BLOCKED";
@@ -204,6 +356,11 @@ async function publishVerificationRecord(state: S): Promise<Partial<S>> {
     missingEvidence: state.missingEvidence,
     regressionRisks: state.regressionRisks,
     criterionVerdicts: state.criterionVerdicts,
+    failureOwner,
+    failedAcIds,
+    failureSummary,
+    recommendedNextStep,
+    questionForUser: state.questionForUser ?? undefined,
   });
 
   const allCriteriaHaveVerdicts = state.contract.acceptance_criteria.every(
@@ -258,6 +415,10 @@ async function publishVerificationRecord(state: S): Promise<Partial<S>> {
         notified_at: new Date().toISOString(),
       },
     });
+    // Dependent tasks parked at AWAITING_APPROVAL (waiting_on_dependency) have
+    // no queue message left — without this wake-up, chains deadlock one step
+    // after the first task completes.
+    await wakeDependentTasks(state.taskId, state.agentRunId);
   } else if (effectiveVerdict === "REWORK_REQUIRED" && transitioned) {
     // Auto re-enqueue engineering with defect context. The scheduler handler will
     // transition REWORK_REQUIRED → IN_PROGRESS and re-run the engineering cell.
@@ -271,7 +432,11 @@ async function publishVerificationRecord(state: S): Promise<Partial<S>> {
         rework_attempt: reworkAttemptsDone + 1,
       },
     });
-  } else if (effectiveVerdict === "BLOCKED" && state.verdict === "REWORK_REQUIRED") {
+  } else if (
+    effectiveVerdict === "BLOCKED" &&
+    state.verdict === "REWORK_REQUIRED" &&
+    failureOwner === "implementation"
+  ) {
     // Rework cap hit — record a human_notification so the Realtime watcher
     // forwards it to Telegram. Verification cell doesn't import from intake.
     const defectSummary = state.blockingDefects.map((d) => `• ${d}`).join("\n");
@@ -284,6 +449,68 @@ async function publishVerificationRecord(state: S): Promise<Partial<S>> {
         message:
           `Blocked after ${reworkAttemptsDone} rework attempt(s).\n\n` +
           `Blocking defects:\n${defectSummary || "(none listed)"}`,
+      },
+    });
+  } else if (effectiveVerdict === "BLOCKED" && failureOwner === "contract" && transitioned) {
+    await recordArtifact({
+      taskId: state.taskId,
+      artifactType: "human_notification",
+      content: {
+        type: "contract_revision_requested",
+        task_id: state.taskId,
+        failed_ac_ids: failedAcIds,
+        message:
+          `Verification found a contract issue in ${failedAcIds.join(", ") || "the contract"}. ` +
+          "Planning will revise the contract and re-run verification.",
+        failure_summary: failureSummary,
+        recommended_next_step: recommendedNextStep,
+        agent_run_id: state.agentRunId,
+        notified_at: new Date().toISOString(),
+      },
+    });
+    await enqueue({
+      job_type: "task.contract_revision.requested",
+      task_id: state.taskId,
+      payload: {
+        task_id: state.taskId,
+        failed_ac_ids: failedAcIds,
+        failure_summary: failureSummary,
+        recommended_next_step: recommendedNextStep,
+        question_for_user: state.questionForUser ?? undefined,
+        verifier_reason: state.modelReview ?? failureSummary,
+      },
+    });
+  } else if (
+    effectiveVerdict === "BLOCKED" &&
+    (failureOwner === "human_decision" || failureOwner === "unknown") &&
+    transitioned
+  ) {
+    await recordArtifact({
+      taskId: state.taskId,
+      artifactType: "human_notification",
+      content: {
+        type: "human_input_required",
+        task_id: state.taskId,
+        failed_ac_ids: failedAcIds,
+        message: failureSummary,
+        question: state.questionForUser ?? "Verification needs human clarification before this task can continue.",
+        recommended_next_step: recommendedNextStep,
+        agent_run_id: state.agentRunId,
+        notified_at: new Date().toISOString(),
+      },
+    });
+  } else if (effectiveVerdict === "BLOCKED" && failureOwner === "infrastructure" && transitioned) {
+    await recordArtifact({
+      taskId: state.taskId,
+      artifactType: "human_notification",
+      content: {
+        type: "infrastructure_blocked",
+        task_id: state.taskId,
+        failed_ac_ids: failedAcIds,
+        message: failureSummary,
+        recommended_next_step: recommendedNextStep,
+        agent_run_id: state.agentRunId,
+        notified_at: new Date().toISOString(),
       },
     });
   }

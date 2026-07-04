@@ -31,7 +31,8 @@ _Last updated: 2026-07-04 (Line 2 proven — T-010 COMPLETE via Telegram; notifi
 | Harness hygiene | Complete (info/exclude, commit guard, scope-out restore) |
 | Supabase transport retry | Complete (`retry-fetch.ts`) |
 | Intake (Telegram + GitHub) | Code complete |
-| **Conversational intake** | **Deployed** (plain-language Telegram → clarifying Qs → confirmed task chain with dependencies; migration 006) |
+| **Conversational intake** | **Proven E2E** (T-011+T-012: vague Telegram sentence → chained contracts → COMPLETE ×2, 2026-07-04) |
+| **Verification failure routing** | **Proven E2E** (contract-revision loop repaired both tasks' contracts; dependency wake-up unparked T-012; migrations 008/009) |
 | Intake auto-dispatch | Complete (`TASKGRAPH_AUTO_ENQUEUE_*`) |
 | Shallow healthcheck | Complete (Supabase + queues + env presence) |
 | **Deep healthcheck** | **Complete + verified** (OpenRouter now probes authenticated `/api/v1/key`; bad keys rejected at startup) |

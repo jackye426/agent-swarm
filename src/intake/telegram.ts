@@ -9,7 +9,12 @@ import {
   resolveRepoForIntake,
 } from "./repo-resolver.js";
 import { createAndEnqueueTask } from "./task-creator.js";
-import { clearConversation, forgetChat, handleConversationMessage } from "./conversation.js";
+import {
+  answerPendingEscalation,
+  clearConversation,
+  forgetChat,
+  handleConversationMessage,
+} from "./conversation.js";
 import { formatIntakeUserContext } from "./intake-context.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -129,6 +134,12 @@ bot.command("forget", async (ctx) => {
   await ctx.reply("All project memory for this chat wiped. Clean slate.");
 });
 
+bot.command("answer", async (ctx) => {
+  await answerPendingEscalation(String(ctx.chat.id), ctx.match?.trim() ?? "", (text) =>
+    ctx.reply(text),
+  );
+});
+
 bot.on("message:text", async (ctx, next) => {
   const chatIdStr = String(ctx.chat.id);
   const text = ctx.message.text.trim();
@@ -212,7 +223,8 @@ bot.command("start", async (ctx) => {
       "/repo set owner/repo — default repo for this chat\n" +
       "/status T-001 — check task status\n" +
       "/reset — start the conversation over (keeps project memory)\n" +
-      "/forget — wipe this chat's project memory\n\n" +
+      "/forget — wipe this chat's project memory\n" +
+      "/answer <decision> — answer a task's clarification question\n\n" +
       "I'll message you here when tasks complete or need attention.",
     { parse_mode: "Markdown" },
   );

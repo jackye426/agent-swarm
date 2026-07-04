@@ -9,6 +9,15 @@ export const PlanRequestedPayloadSchema = z.object({
   repo_url: z.string().url().optional(),
 });
 
+export const ContractRevisionRequestedPayloadSchema = z.object({
+  task_id: z.string().regex(/^T-\d+$/),
+  failed_ac_ids: z.array(z.string().regex(/^AC-\d+$/)).default([]),
+  failure_summary: z.string().default(""),
+  recommended_next_step: z.string().default(""),
+  question_for_user: z.string().optional(),
+  verifier_reason: z.string().default(""),
+});
+
 export const ExecutionRequestedPayloadSchema = z.object({
   task_id: z.string().regex(/^T-\d+$/),
   context: z.record(z.unknown()).optional(),
@@ -31,6 +40,7 @@ export const ReworkRequestedPayloadSchema = z.object({
 });
 
 export type PlanRequestedPayload = z.infer<typeof PlanRequestedPayloadSchema>;
+export type ContractRevisionRequestedPayload = z.infer<typeof ContractRevisionRequestedPayloadSchema>;
 export type ExecutionRequestedPayload = z.infer<typeof ExecutionRequestedPayloadSchema>;
 export type VerificationRequestedPayload = z.infer<typeof VerificationRequestedPayloadSchema>;
 export type ReworkRequestedPayload = z.infer<typeof ReworkRequestedPayloadSchema>;

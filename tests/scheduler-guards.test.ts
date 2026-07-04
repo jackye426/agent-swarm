@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { TaskStatus } from "../src/core/types.js";
 import {
+  isStaleContractRevisionJob,
   isStaleExecutionJob,
   isStalePlanningJob,
   isStaleReworkJob,
@@ -12,6 +13,11 @@ test("stale planning job when status is not DRAFT or PLANNING", () => {
   assert.equal(isStalePlanningJob("READY" as TaskStatus), true);
   assert.equal(isStalePlanningJob("DRAFT" as TaskStatus), false);
   assert.equal(isStalePlanningJob("PLANNING" as TaskStatus), false);
+});
+
+test("contract revision only runs when BLOCKED", () => {
+  assert.equal(isStaleContractRevisionJob("BLOCKED" as TaskStatus), false);
+  assert.equal(isStaleContractRevisionJob("READY" as TaskStatus), true);
 });
 
 test("rework only when REWORK_REQUIRED", () => {

@@ -5,6 +5,7 @@ import {
   evaluateDiskFree,
   evaluateQueueDepth,
   findCredentialFailures,
+  findStaleRunningAgentRuns,
   findStuckTasks,
 } from "../scripts/lib/watchdog-checks.js";
 
@@ -37,6 +38,40 @@ test("findStuckTasks ignores non-active statuses regardless of age", () => {
     45 * 60_000,
   );
   assert.equal(alerts.length, 0);
+});
+
+test("findStaleRunningAgentRuns flags old running agent runs", () => {
+  const alerts = findStaleRunningAgentRuns(
+    [
+      {
+        id: "run-old",
+        task_id: "T-012",
+        worker_type: "rework-cell",
+        status: "running",
+        started_at: minutesAgo(50),
+      },
+      {
+        id: "run-new",
+        task_id: "T-013",
+        worker_type: "engineering-cell",
+        status: "running",
+        started_at: minutesAgo(10),
+      },
+      {
+        id: "run-complete",
+        task_id: "T-014",
+        worker_type: "engineering-cell",
+        status: "complete",
+        started_at: minutesAgo(90),
+      },
+    ],
+    NOW,
+    45 * 60_000,
+  );
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0]!.key, "stale_run:run-old");
+  assert.match(alerts[0]!.message, /T-012/);
+  assert.match(alerts[0]!.message, /recover:stale-rework/);
 });
 
 test("findCredentialFailures matches 402 and fetch failed, one alert, deduped by task", () => {
