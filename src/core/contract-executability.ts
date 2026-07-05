@@ -52,6 +52,12 @@ const VAGUE_PATTERNS = [
   /\bverify functionality\b/i,
 ];
 
+const HARNESS_ONLY_PATH_PATTERNS = [
+  /\btasks\/T-\d+\/evidence\b/i,
+  /\btasks\/T-\d+\/contract\.ya?ml\b/i,
+  /\.taskgraph/i,
+];
+
 const COMMAND_PATTERNS = [
   /^npm test$/i,
   /^npm run \S+$/i,
@@ -184,6 +190,14 @@ export function validateContractExecutability(
   let hasCommandAc = false;
   let hasExecutableAc = false;
 
+  for (const scopeItem of [...contract.scope.in, ...contract.scope.out]) {
+    if (HARNESS_ONLY_PATH_PATTERNS.some((p) => p.test(scopeItem))) {
+      errors.push(
+        `Scope references harness-only path "${scopeItem}"; TaskGraph support/evidence files are excluded from product commits`,
+      );
+    }
+  }
+
   for (const ac of contract.acceptance_criteria) {
     const kinds = classifyAcceptanceCriterion(ac);
     acClassifications[ac.id] = kinds;
@@ -191,6 +205,16 @@ export function validateContractExecutability(
 
     if (primary === "command") hasCommandAc = true;
     if (primary === "command" || primary === "diff_inspection") hasExecutableAc = true;
+
+    if (
+      HARNESS_ONLY_PATH_PATTERNS.some((pattern) =>
+        [ac.requirement, ...ac.verification].some((text) => pattern.test(text)),
+      )
+    ) {
+      errors.push(
+        `${ac.id}: verification references harness-only evidence/support paths (${ac.verification.join(", ")})`,
+      );
+    }
 
     if (primary === "unknown") {
       errors.push(unclassifiableVerificationError(ac));

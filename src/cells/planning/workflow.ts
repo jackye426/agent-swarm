@@ -134,6 +134,8 @@ Acceptance criterion verification methods MUST be pipeline-executable:
 
 - BAD (do not use): inline composite shell harnesses with pipes/background jobs/sleep/curl/kill such as "npm start & sleep 2 && curl ..."; the pipeline runs on Windows/PowerShell and these are not portable
 
+- BAD (do not use): requiring tasks/T-*/evidence, tasks/T-*/contract.yaml, .taskgraph*, or other TaskGraph harness/support files to appear in the product repo diff; these paths are excluded from product commits and evidence lives in TaskGraph artifacts
+
 - For endpoint/API behavior, either require engineering to add a portable npm script or Node test file and verify with "npm test"/"npm run <script>", or use a diff-inspection method for route/header/error-handling presence
 
 - Every AC needs at least one command OR diff-inspection method

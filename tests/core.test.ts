@@ -244,6 +244,32 @@ test("executability rejects inline composite shell commands with portable guidan
   assert.ok(result.errors.some((e) => e.includes("portable npm script")));
 });
 
+test("executability rejects harness-only evidence paths in product contracts", () => {
+  const evidencePathContract = {
+    ...contract,
+    scope: {
+      in: ["tasks/T-013/evidence/"],
+      out: [],
+    },
+    acceptance_criteria: [
+      {
+        id: "AC-1",
+        requirement: "Manual report is committed under tasks/T-013/evidence.",
+        verification: ["File presence check in PR diff for tasks/T-013/evidence/manual-test-report.md"],
+      },
+      {
+        id: "AC-2",
+        requirement: "Tests pass.",
+        verification: ["npm test"],
+      },
+    ],
+  };
+  const result = validateContractExecutability(evidencePathContract);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.includes("harness-only path")));
+  assert.ok(result.errors.some((e) => e.includes("AC-1")));
+});
+
 test("resolveTestCommandsFromPacket prefers payload then packet then seed", () => {
   const packet = {
     test_commands: ["npm run typecheck"],
