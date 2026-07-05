@@ -545,9 +545,7 @@ ${formatBindingProductDecisions(state.requirementsSummary)}
 
 ${CONTRACT_DRAFT_VERIFICATION_RULES}
 
-- scope.out MUST include "tasks/${state.taskId}/contract.yaml" and ".taskgraph*"
-
-- scope.in SHOULD include "tasks/${state.taskId}/evidence/" when evidence YAML files are expected
+- Do not include TaskGraph harness/support paths in scope.in, scope.out, acceptance criteria, or verification methods. This includes "tasks/${state.taskId}/contract.yaml", "tasks/${state.taskId}/evidence/", ".taskgraph*", and managed CLAUDE.md blocks. These are pipeline metadata, not product deliverables.
 
 - Return only the JSON object, no markdown fences, no commentary`,
 
