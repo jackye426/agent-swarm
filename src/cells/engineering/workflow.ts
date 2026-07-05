@@ -59,6 +59,39 @@ const EngineeringState = Annotation.Root({
 
 type S = typeof EngineeringState.State;
 
+export function chooseRemoteDefaultRef(remoteBranchOutput: string): string | null {
+  const refs = remoteBranchOutput
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const arrow = line.match(/^origin\/HEAD\s+->\s+(origin\/\S+)$/);
+      return arrow?.[1] ?? line;
+    })
+    .filter((line) => line.startsWith("origin/") && line !== "origin/HEAD");
+
+  return refs.find((ref) => ref === "origin/main") ??
+    refs.find((ref) => ref === "origin/master") ??
+    refs[0] ??
+    null;
+}
+
+async function resolveRemoteDefaultRef(cloneDir: string): Promise<string | null> {
+  const symbolic = await runCommand("git", ["symbolic-ref", "refs/remotes/origin/HEAD"], {
+    cwd: cloneDir,
+  });
+  if (symbolic.exitCode === 0) {
+    const ref = symbolic.stdout.trim().replace(/^refs\/remotes\//, "");
+    if (ref.startsWith("origin/")) return ref;
+  }
+
+  const branches = await runCommand("git", ["branch", "-r", "--format=%(refname:short)"], {
+    cwd: cloneDir,
+  });
+  if (branches.exitCode !== 0) return null;
+  return chooseRemoteDefaultRef(branches.stdout);
+}
+
 async function resolveHeadSha(worktreePath: string): Promise<string | null> {
   const result = await runCommand("git", ["rev-parse", "--verify", "HEAD"], { cwd: worktreePath });
   return result.exitCode === 0 && result.stdout.trim() ? result.stdout.trim() : null;
@@ -100,6 +133,9 @@ async function resolveRepoRoot(state: S): Promise<Partial<S>> {
   } catch { /* not cloned yet */ }
 
   if (cloneDirExists) {
+    await runCommand("git", ["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], {
+      cwd: cloneDir,
+    });
     const fetch = await runCommand("git", ["fetch", "--depth", "50", "origin"], { cwd: cloneDir, timeoutMs: 120_000 });
     if (fetch.exitCode !== 0) {
       const hasHead = await runCommand("git", ["rev-parse", "--verify", "HEAD"], { cwd: cloneDir });
@@ -142,13 +178,17 @@ async function resolveRepoRoot(state: S): Promise<Partial<S>> {
     }
 
     await runCommand("git", ["remote", "set-head", "origin", "-a"], { cwd: cloneDir, timeoutMs: 120_000 });
-    const reset = await runCommand("git", ["reset", "--hard", "origin/HEAD"], { cwd: cloneDir, timeoutMs: 120_000 });
+    const remoteDefaultRef = await resolveRemoteDefaultRef(cloneDir);
+    if (!remoteDefaultRef) {
+      return { error: `Failed to resolve default branch for ${taskRepo.repoFullName} after fetch` };
+    }
+    const reset = await runCommand("git", ["reset", "--hard", remoteDefaultRef], { cwd: cloneDir, timeoutMs: 120_000 });
     if (reset.exitCode !== 0) {
       const hasHead = await runCommand("git", ["rev-parse", "--verify", "HEAD"], { cwd: cloneDir });
       if (hasHead.exitCode !== 0) {
         return { repoRoot: cloneDir, repoHasHead: false };
       }
-      return { error: `Failed to refresh ${taskRepo.repoFullName} to origin/HEAD: ${reset.stderr || reset.stdout}` };
+      return { error: `Failed to refresh ${taskRepo.repoFullName} to ${remoteDefaultRef}: ${reset.stderr || reset.stdout}` };
     }
   } else {
     const token = process.env.GITHUB_TOKEN?.trim();

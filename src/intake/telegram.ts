@@ -9,6 +9,7 @@ import {
   resolveRepoForIntake,
 } from "./repo-resolver.js";
 import { createAndEnqueueTask } from "./task-creator.js";
+import { formatTaskStatusMessage } from "./status-format.js";
 import {
   answerPendingEscalation,
   clearConversation,
@@ -203,11 +204,7 @@ bot.command("status", async (ctx) => {
       repo_full_name: string | null;
       updated_at: string;
     };
-    const repoLine = t.repo_full_name ? `\nRepo: \`${t.repo_full_name}\`` : "";
-    await ctx.reply(
-      `*${t.id}* — ${t.status}\n${t.title}${repoLine}\n_Updated: ${new Date(t.updated_at).toLocaleString()}_`,
-      { parse_mode: "Markdown" },
-    );
+    await ctx.reply(formatTaskStatusMessage(t));
   } catch (err) {
     await ctx.reply(`❌ Error: ${err instanceof Error ? err.message : String(err)}`);
   }

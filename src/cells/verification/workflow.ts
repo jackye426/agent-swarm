@@ -17,6 +17,7 @@ import { integrateCompletedTaskBranch } from "../../core/branch-integration.js";
 import { invokeRoleModel } from "../../core/model-router.js";
 import { readKnowledgeExcerpt } from "../../core/knowledge-excerpt.js";
 import { formatVerificationRequirementsSection } from "../../core/requirements.js";
+import { normalizeTextList } from "../../core/queue-schemas.js";
 import {
   dependenciesComplete,
   getDependentTaskIds,
@@ -156,8 +157,8 @@ ${state.prDiff}`,
     return {
       modelReview: content,
       criterionVerdicts: json.criterion_verdicts ?? {},
-      blockingDefects: json.blocking_defects ?? [],
-      regressionRisks: json.regression_risks ?? [],
+      blockingDefects: normalizeTextList(json.blocking_defects),
+      regressionRisks: normalizeTextList(json.regression_risks),
       failureOwner: normalizeFailureOwner(json.failure_owner),
       failedAcIds: normalizeFailedAcIds(json.failed_ac_ids),
       failureSummary: json.failure_summary ?? null,

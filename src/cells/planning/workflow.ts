@@ -132,6 +132,10 @@ Acceptance criterion verification methods MUST be pipeline-executable:
 
 - BAD (do not use): "Manual review by Engineering Owner", "Works as expected", "Verify functionality"
 
+- BAD (do not use): inline composite shell harnesses with pipes/background jobs/sleep/curl/kill such as "npm start & sleep 2 && curl ..."; the pipeline runs on Windows/PowerShell and these are not portable
+
+- For endpoint/API behavior, either require engineering to add a portable npm script or Node test file and verify with "npm test"/"npm run <script>", or use a diff-inspection method for route/header/error-handling presence
+
 - Every AC needs at least one command OR diff-inspection method
 
 - Prefer detected test commands from the repo context when listing command methods`;

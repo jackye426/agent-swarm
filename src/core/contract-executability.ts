@@ -73,6 +73,31 @@ const COMMAND_PATTERNS = [
   /\bci run\b/i,
 ];
 
+const UNSUPPORTED_COMPOSITE_SHELL_PATTERNS = [
+  /\s&&\s/,
+  /\s\|\s/,
+  /\s&\s/,
+  /;\s*\w/,
+  /\bfor\b[\s\S]*\bdo\b/i,
+  /\bkill\s+%?\d\b/i,
+  /\bcurl\b/i,
+  /\bsleep\s+\d+/i,
+];
+
+function isUnsupportedCompositeShellCommand(method: string): boolean {
+  const trimmed = method.trim();
+  if (!UNSUPPORTED_COMPOSITE_SHELL_PATTERNS.some((p) => p.test(trimmed))) return false;
+  return /^(npm|pnpm|yarn|node|tsx|npx|curl|OPENROUTER_API_KEY=)/i.test(trimmed);
+}
+
+function unclassifiableVerificationError(ac: AcceptanceCriterion): string {
+  const methods = ac.verification.join(", ");
+  if (ac.verification.some(isUnsupportedCompositeShellCommand)) {
+    return `${ac.id}: verification uses unsupported composite shell command (${methods}); use a portable npm script/Node test file or diff-inspection method instead`;
+  }
+  return `${ac.id}: verification methods are vague or unclassifiable (${methods})`;
+}
+
 /** Extract a runnable command string from a verification method, if present. */
 export function extractCommandFromVerification(method: string): string | null {
   const trimmed = method.trim();
@@ -168,9 +193,7 @@ export function validateContractExecutability(
     if (primary === "command" || primary === "diff_inspection") hasExecutableAc = true;
 
     if (primary === "unknown") {
-      errors.push(
-        `${ac.id}: verification methods are vague or unclassifiable (${ac.verification.join(", ")})`,
-      );
+      errors.push(unclassifiableVerificationError(ac));
     } else if (primary === "human") {
       errors.push(
         `${ac.id}: only human verification methods (${ac.verification.join(", ")}) — not pipeline-executable`,

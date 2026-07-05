@@ -1,5 +1,29 @@
 import { z } from "zod";
 
+export function normalizeTextList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (typeof item === "object" && item !== null) {
+        const obj = item as Record<string, unknown>;
+        const summary = obj.summary ?? obj.description ?? obj.message ?? obj.error;
+        const id = typeof obj.id === "string" ? `${obj.id}: ` : "";
+        if (typeof summary === "string" && summary.trim()) return `${id}${summary}`.trim();
+        try {
+          return JSON.stringify(obj);
+        } catch {
+          return String(item);
+        }
+      }
+      return String(item);
+    })
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+const TextListSchema = z.preprocess((value) => normalizeTextList(value), z.array(z.string()));
+
 export const PlanRequestedPayloadSchema = z.object({
   task_id: z.string().regex(/^T-\d+$/),
   goal: z.string().min(1),
@@ -34,8 +58,8 @@ export const VerificationRequestedPayloadSchema = z.object({
 
 export const ReworkRequestedPayloadSchema = z.object({
   task_id: z.string().regex(/^T-\d+$/),
-  blocking_defects: z.array(z.string()).default([]),
-  missing_evidence: z.array(z.string()).default([]),
+  blocking_defects: TextListSchema.default([]),
+  missing_evidence: TextListSchema.default([]),
   rework_attempt: z.number().int().min(1),
 });
 

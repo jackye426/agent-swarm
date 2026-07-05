@@ -3,8 +3,10 @@ import { test } from "node:test";
 import {
   appendProjectNote,
   buildSystemPrompt,
+  contradictsKnownCompletedWork,
   formatRepoSnapshot,
   parseConversationAction,
+  repairKnownWorkContradiction,
 } from "../src/intake/conversation.js";
 import type { SeedRepoContext } from "../src/intake/repo-scanner.js";
 
@@ -142,7 +144,28 @@ test("buildSystemPrompt embeds existing work summary when provided", () => {
 
   assert.match(prompt, /EXISTING AND IN-FLIGHT WORK/);
   assert.match(prompt, /T-012 \[COMPLETE\]/);
+  assert.match(prompt, /authoritative source of truth/);
+  assert.match(prompt, /overrides older conversation history/);
   assert.match(prompt, /project EXISTS/);
+  assert.match(prompt, /Never say it was not built yet/);
+  assert.match(prompt, /start fresh/);
+});
+
+test("completed work backstop catches stale not-built replies", () => {
+  const workSummary = [
+    "T-012 [COMPLETE] jackye426/swarm-sandbox - Dark-Themed To-Do List Frontend",
+    "T-011 [COMPLETE] jackye426/swarm-sandbox - Backend API and Data Storage",
+  ].join("\n");
+  const action = {
+    action: "reply" as const,
+    message: "Since the to-do app wasn't built yet, we'll start fresh.",
+  };
+
+  assert.equal(contradictsKnownCompletedWork(action, workSummary), true);
+  const repaired = repairKnownWorkContradiction(workSummary);
+  assert.match(repaired, /already exists/);
+  assert.match(repaired, /T-012 \[COMPLETE\]/);
+  assert.doesNotMatch(repaired, /start fresh/i);
 });
 
 test("buildSystemPrompt omits existing work summary when empty", () => {

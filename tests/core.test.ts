@@ -225,6 +225,25 @@ test("executability warns on command mismatch against seed test commands", () =>
   assert.equal(result.errors.length, 0);
 });
 
+test("executability rejects inline composite shell commands with portable guidance", () => {
+  const cmdContract = {
+    ...contract,
+    acceptance_criteria: [
+      {
+        id: "AC-1",
+        requirement: "Endpoint responds with JSON.",
+        verification: [
+          "npm start & sleep 2 && curl -s -X POST http://localhost:3000/api/ai | node -e \"console.log('OK')\" && kill %1",
+        ],
+      },
+    ],
+  };
+  const result = validateContractExecutability(cmdContract);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.includes("unsupported composite shell command")));
+  assert.ok(result.errors.some((e) => e.includes("portable npm script")));
+});
+
 test("resolveTestCommandsFromPacket prefers payload then packet then seed", () => {
   const packet = {
     test_commands: ["npm run typecheck"],

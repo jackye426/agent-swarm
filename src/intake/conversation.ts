@@ -407,7 +407,7 @@ ${repoList}
 ${ctx.chatDefault ? `Default for this chat: ${ctx.chatDefault}` : "No default repo for this chat."}
 ${
   ctx.workSummary?.trim()
-    ? `\nEXISTING AND IN-FLIGHT WORK (source of truth — the user may refer to these in plain words):\n${ctx.workSummary.trim()}\nWhen the user asks to change or extend something listed above, that project EXISTS:\ndo not ask them to describe it from scratch. Completed work is merged into the repo,\nso the repo snapshot reflects it. Create NEW tasks for the change, referencing the\nexisting files.`
+    ? `\nEXISTING AND IN-FLIGHT WORK (authoritative source of truth - the user may refer to these in plain words):\n${ctx.workSummary.trim()}\nThis section overrides older conversation history, project notes, missing repo snapshot details, and your uncertainty.\nWhen a COMPLETE item plausibly matches the user's words (for example: "to-do app", "daily app", "task app", "the app we built"), that project EXISTS.\nNever say it was not built yet, was not started, needs to start fresh, or must be described from scratch.\nCompleted work is merged into the repo, so create NEW tasks for the requested change, referencing the existing files.\nAsk a narrow disambiguation question only if multiple existing projects plausibly match.`
     : ""
 }
 If the target project is ambiguous, ask in plain words (e.g. "Is this for the sandbox project or the agent-swarm project?") and map the answer to a repo yourself. As soon as you have settled which repo the work targets, include it as "repo" on your reply action — the system will then give you a snapshot of that repo's contents.
@@ -446,6 +446,33 @@ RESPONSE FORMAT — you MUST reply with a single JSON object, nothing else:
 - To create the confirmed tasks: {"action":"create_tasks","repo":"owner/name","requirements_summary":"<3-6 sentences: the agreed requirements, constraints, and your assumptions>","message":"<short confirmation to send after creating>","tasks":[{"goal":"...","context":"...","depends_on_previous":false},{"goal":"...","context":"...","depends_on_previous":true}]}
 requirements_summary is REQUIRED on create_tasks — it becomes the audit record of what was agreed.
 Never emit create_tasks without an explicit user confirmation of your proposed breakdown in this conversation.`;
+}
+
+function completedWorkLines(workSummary: string | null | undefined): string[] {
+  return (workSummary ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /\[COMPLETE\]/.test(line));
+}
+
+export function contradictsKnownCompletedWork(
+  action: ConversationAction,
+  workSummary: string | null | undefined,
+): boolean {
+  if (action.action !== "reply") return false;
+  if (completedWorkLines(workSummary).length === 0) return false;
+  return /\b(wasn['’]?t|was not|isn['’]?t|is not|not)\s+(built|started|done|created)\b|\b(start fresh|from scratch)\b/i.test(
+    action.message,
+  );
+}
+
+export function repairKnownWorkContradiction(workSummary: string | null | undefined): string {
+  const completed = completedWorkLines(workSummary).slice(0, 3);
+  const evidence = completed.length > 0 ? ` I see completed work: ${completed.join("; ")}.` : "";
+  return (
+    `That project already exists in the repo.${evidence} ` +
+    `What change or extension would you like to make next?`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -556,11 +583,20 @@ export async function handleConversationMessage(
     return;
   }
 
-  const action = parseConversationAction(content) ?? {
+  let action = parseConversationAction(content) ?? {
     // Malformed JSON: treat the raw content as a reply rather than dropping the turn.
     action: "reply" as const,
     message: content.slice(0, 2000),
   };
+
+  if (contradictsKnownCompletedWork(action, workSummary)) {
+    console.warn("[Conversation] Repaired stale reply that contradicted completed work summary.");
+    action = {
+      action: "reply",
+      message: repairKnownWorkContradiction(workSummary),
+      ...((state.repo ?? chatDefault) ? { repo: (state.repo ?? chatDefault)! } : {}),
+    };
+  }
 
   if (action.action === "reply") {
     await saveConversation(chatId, {
