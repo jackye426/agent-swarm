@@ -96,6 +96,29 @@ function compactContext(state: S): string {
 
 }
 
+const HARNESS_ONLY_SCOPE_PATTERNS = [
+  /\btasks\/T-\d+\/evidence\b/i,
+  /\btasks\/T-\d+\/contract\.ya?ml\b/i,
+  /\.taskgraph/i,
+];
+
+function isHarnessOnlyScopePath(scopeItem: string): boolean {
+  return HARNESS_ONLY_SCOPE_PATTERNS.some((pattern) => pattern.test(scopeItem));
+}
+
+function scrubHarnessOnlyScope(contract: TaskContract): TaskContract {
+  const scrubbedIn = contract.scope.in.filter((item) => !isHarnessOnlyScopePath(item));
+  const scrubbedOut = contract.scope.out.filter((item) => !isHarnessOnlyScopePath(item));
+
+  return {
+    ...contract,
+    scope: {
+      in: scrubbedIn.length > 0 ? scrubbedIn : ["Product source files and executable behavior for this task"],
+      out: scrubbedOut,
+    },
+  };
+}
+
 
 
 function groundedReviewUserMessage(state: S, body: string): string {
@@ -1037,6 +1060,8 @@ export async function reviseContractFromVerification(
       content: `You are revising a task contract after independent verification found a contract/planning defect.
 Revise ONLY the flawed acceptance criteria or related scope/constraints needed to remove the defect.
 Preserve valid completed work, the task id, the user goal, approvals_required, rollback shape, and executable verification methods.
+Remove TaskGraph harness/support paths from scope and verification requirements: tasks/T-*/evidence, tasks/T-*/contract.yaml, .taskgraph*, CLAUDE.md managed blocks, and similar pipeline-only files are not product deliverables and must not be required in the product diff.
+Evidence for verification belongs in TaskGraph artifacts, test commands, and product-facing behavior checks, not in committed harness files.
 If the defect resembles "a runtime data file must be both committed and gitignored", prefer:
 - commit a directory placeholder such as data/.gitkeep
 - gitignore the runtime data file
@@ -1112,7 +1137,7 @@ ${JSON.stringify(packet, null, 2)}`,
           .join("; ")}`,
       );
     }
-    revised = parsed.data;
+    revised = scrubHarnessOnlyScope(parsed.data);
   } catch (err) {
     return failRevision(`Failed to parse contract revision JSON: ${(err as Error).message}`);
   }
