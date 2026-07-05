@@ -7,7 +7,7 @@
 > - Run `npm run typecheck && npm test` after every step; keep the suite green.
 > - Deploy after code steps: `pm2 restart taskgraph-scheduler taskgraph-intake --update-env; pm2 save`.
 > - `src/cells/planning/workflow.ts` is blank-line-heavy — copy Edit anchors from a fresh Read.
-> - Steps are ordered by dependency: 1 raises the ceiling instantly, 3 (evals) MUST land before 4–7 so every later change is measured, not vibed. Do not reorder 3 later.
+> - **Critical path:** `3 (evals) → 3.5e/f/a/g/b → 5a (candidate verification) → 6 → 6.5 → workers=2`. Step 2 runs lightweight alongside; Steps 4/4.5 and the 3.5c shadow ensemble are eval-gated — implement only when baseline data justifies them. Do not reorder 3 later.
 > - Step 6 is gated: do not start it until the human confirms the Phase 5 soak has formally passed.
 
 ## TLDR
@@ -47,13 +47,14 @@ Strategy: ride the model curve for generation (swappable, commodity), **own the 
       Never remove information still true; compress rather than delete.
       ```
       Write the result to the card path. Failures log a warning and never throw (card is best-effort).
+  - [ ] 🟥 **Bootstrap the first card deterministically, not from a diff.** A merged diff cannot infer Purpose/Module map/Key commands. `updateRepoCard` on a missing card first calls a `bootstrapRepoCard(repoFullName)` that builds the initial card from the seed scanner's deterministic output (`scanRepoSeedContext`: README excerpt, package manifest + scripts, root file tree, recent commits) via one model call with the card template — THEN applies the diff update. Subsequent updates are diff-driven only.
   - [ ] 🟥 Call `updateRepoCard` from the merge-success path of `integrateCompletedTaskBranch` (v2 Step 1) — the merged diff is obtainable there via `git diff <default>@{1}..<default>` or by capturing the merge diff before push; simplest: `git show --stat -p HEAD` in the integration worktree before cleanup, capped at 30k chars.
   - [ ] 🟥 Inject the card where judgment happens:
     - `src/intake/conversation.ts` — add to `PromptContext` + `buildSystemPrompt` (section `REPO KNOWLEDGE CARD:`), loaded in `handleConversationMessage` next to the snapshot.
     - `src/cells/planning/workflow.ts` — prepend to the contract-draft user message when present.
     - `src/cells/verification/workflow.ts` — insert into `runModelReview` user message (after requirements section from v2 Step 2).
   - [ ] 🟥 Scope-targeted retrieval — new helper in `src/core/contract-executability.ts` or new `src/core/scope-retrieval.ts`: `readScopedFiles(repoRoot: string, scopeIn: string[], maxTotalChars = 20000): Promise<string>` — for each scope entry that looks like a concrete path (contains `/` or `.`), read the file if it exists under repoRoot, concatenate with `=== path ===` headers, head-truncate to budget. Wire into the engineering context packet (where `enrichExecutionContextPacket` builds `execution_ready`) so Claude Code starts with the full text of in-scope files, and into verification's user message (replacing nothing — additive section `Current content of in-scope files:`).
-  - [ ] 🟥 High-risk-sector detection — new helper `classifyRiskDomain({ goal, context, repoCard, scopedFiles }): "standard" | "high_risk"` plus reason tags (`healthcare`, `finance`, `legal`, `security`, `safety_critical`, `children`, `employment_housing_credit`, `public_sector`, `regulated_data`). Inject the classification into intake, planning, engineering, and verification prompts. False positives are acceptable; false negatives are not.
+  - [ ] 🟥 High-risk-sector detection — new helper `classifyRiskDomain({ goal, context, repoCard, scopedFiles }): "standard" | "high_risk"` plus reason tags (`healthcare`, `finance`, `legal`, `security`, `safety_critical`, `children`, `employment_housing_credit`, `public_sector`, `regulated_data`). Inject the classification into intake, planning, engineering, and verification prompts. False positives are acceptable; false negatives are not. **The LLM classifier is escalate-only: the per-repo verification policy (3.5f) carries a static `risk_tier` in its frontmatter as the floor, and the effective tier is `max(policy floor, classifier)` — a model may raise risk, never lower it below the humans' standing judgment.**
   - [ ] 🟥 Tests: `tests/repo-card.test.ts` — path derivation, read-missing→null, section-preserving update can be tested by mocking `invokeRoleModel`? The repo has no mocking convention for it — instead export the prompt-builder pure function and test that; test `readScopedFiles` against fixture dirs (budget cap, missing files skipped, non-path scope entries ignored).
 
 - [ ] 🟥 **Step 3: Eval harness (before any loop changes — this is the measuring stick)**
@@ -88,9 +89,9 @@ Strategy: ride the model curve for generation (swappable, commodity), **own the 
     plus the contract, binding requirements, repo card, verification policy (3.5f), and judging rules (same blocks as `runModelReview`). Parse with the existing `parseReviewJson`. Gate: `TASKGRAPH_AGENTIC_VERIFIER=true`; timeout `TASKGRAPH_AUDIT_TIMEOUT_MS` default 600000.
     - **FAIL CLOSED — no anomaly may drift toward COMPLETE.** Auditor timeout, dirty worktree (`git status --porcelain` non-empty), malformed/unparseable verdict, or a 3.5a re-execution that could not run → the audit result is `INCONCLUSIVE for all criteria, failure_owner "unknown"`, which routes to BLOCKED + human escalation via the existing paths. Never fall back to the one-shot review as the verdict of record when the audit was attempted and invalidated — a compromised audit run is evidence of a problem, not an excuse to use a weaker judge.
     - **Enforce read-only with harness permissions, not prompts:** invoke the auditor with Claude Code's tool permissioning so edit tools are structurally unavailable — e.g. `--disallowedTools "Write,Edit,NotebookEdit"` (verify the exact flag against the installed CLI version's `--help`; a `.claude/settings.json` written into the audit worktree with a deny-list works too). The dirty-check stays as defense-in-depth, but "read-only" must be a configuration property, not a request.
-    - **Deliver knowledge via `CLAUDE.md`:** before invoking the auditor (and the engineering worker — same change in `writeWorktreeSupportFiles`), write the repo card + verification policy + binding requirements into the worktree's `CLAUDE.md`. The harness auto-loads it for the whole session — persistent context instead of a one-shot prompt preamble. Add `CLAUDE.md` to the commit-guard exclusions and `.git/info/exclude` (it is harness support, never product code).
+    - **Deliver knowledge via a managed `CLAUDE.md` block — never overwrite the repo's own.** Before invoking the auditor (and the engineering worker — same change in `writeWorktreeSupportFiles`), write the repo card + verification policy + binding requirements into the worktree's `CLAUDE.md` inside idempotent markers (`<!-- taskgraph:begin -->` … `<!-- taskgraph:end -->`): replace the block if present, append after existing content otherwise. The repository's own instructions remain authoritative — the block's first line states "where these conflict with the repository's own instructions above, the repository's instructions win." If the repo tracks `CLAUDE.md` in git, do NOT add it to exclusions; instead ensure the commit guard strips the managed block before staging (extend `scrubHarnessLinesFromGitignore`-style handling). If untracked, add to `.git/info/exclude` as usual.
     - **Isolation (staged honestly):** v3 interim = disposable worktree, no `.env` in the tree, permission-enforced read-only tools (above), hard timeout, process-tree kill, dirty-check invalidation. This is NOT a sandbox — the auditor process still has network and user-level access. Record this as an accepted risk in `system-knowledge/decisions/` (one paragraph, numbered decision doc). Full containment (read-only mount, deny-by-default network, CPU/mem limits, ephemeral services) is REQUIRED work in the cloud-worker milestone — the same containerization serves both; do not build a Windows-host-only sandbox twice.
-  - [ ] 🟥 **3.5c Ensemble adjudication.** When BOTH the one-shot review (existing `runModelReview`) and the agentic audit (3.5b) run: compare per-criterion verdicts. Agreement → proceed with the agentic result (it had more information). Disagreement on any criterion → conservative merge: FAIL beats PASS, INCONCLUSIVE beats PASS; if the merged verdict changes the task outcome (COMPLETE↔not), set `failure_owner: "unknown"` and let the existing human_input_required routing escalate with both verdicts in the message. Record both raw verdicts in the `model_review` artifact (`{ oneshot, audit, merged }`) — this disagreement data is the verifier-reliability signal, free.
+  - [ ] 🟥 **3.5c Shadow ensemble (disagreement logger, NOT a gating layer).** When the agentic audit (3.5b) runs and is valid, it IS the verdict of record — it saw strictly more evidence. The one-shot review runs in shadow mode (cheap, capped) purely to log per-criterion disagreement into the `model_review` artifact (`{ audit, oneshot_shadow, disagreements }`) as calibration telemetry. Rationale: same-family model verdicts are correlated, so a mandatory conservative merge adds false blocks without independent signal — fresh evidence (3.5a) and separate execution are the real independence. Promote the ensemble to a gating layer ONLY if 3.5d/7b data shows shadow disagreements catching real missed defects. (Fail-closed rules from 3.5b are unaffected: an invalid audit is INCONCLUSIVE, never replaced by the shadow verdict.)
   - [ ] 🟥 **3.5d Verifier calibration cards (measure the gate, not just the pipeline).** Extend the Step 3 eval schema with `seeded: { defect_description } | { known_good: true }` cards that bypass engineering: the fixture contains a PRE-BUILT branch diff (fixture files for base + task branch), and the eval runs ONLY verification against it. Initial battery of 8 in the DEV pool: seeded off-by-one with green-looking tests; unimplemented AC with plausible diff; scope violation (out-of-scope file modified); tampered evidence (ciOutput claims pass, tests actually fail — validates 3.5a); committed secret; harness-file pollution; and 2 known-good diffs. Plus 4 more in the SEALED HOLDOUT pool (same classes, different content, authored once and never inspected during tuning). Report **verifier recall** and **precision** for dev and holdout separately in `evals/HISTORY.md`.
     - **Gate semantics:** 8/8-class coverage passing on dev is a SMOKE TEST — it proves the machinery works, not that the gate is reliable. The `SCHEDULER_WORKERS=2` gate (Step 5) is: holdout recall with zero holdout leakage into tuning, plus zero fail-open incidents in the log. Small-n means the number is a floor indicator, not a false-pass rate estimate — treat it accordingly and grow the holdout pool over time.
   - [ ] 🟥 **3.5f Versioned verification policy per repo (normative, separate from the card).** The repo card is descriptive history; blocking criteria must come from a versioned, explicit policy. New file per repo: `system-knowledge/repos/${owner}__${name}-policy.md` with YAML frontmatter `policy_version: N`, sections: **Blockers** (what always blocks: failing required commands, out-of-scope writes, new deps unless requirements allow, secrets), **Mandatory checks by path/risk class** (e.g. `server.*` → runtime probe required), **Excluded from review** (lockfiles, generated files), **Evidence requirements** (what a finding must cite), **Pre-existing vs introduced** (only defects introduced by this task's diff may block; pre-existing issues are recorded as `regression_risks`, never blockers). Loader `readVerificationPolicy(repoFullName)` in `src/core/repo-card.ts` (shared path helper); injected into one-shot + agentic verifier prompts and used to configure the 3.5e mechanical rungs. Seed a default template applied when no per-repo policy exists. `policy_version` participates in evidence invalidation (Step 5a).
@@ -98,13 +99,92 @@ Strategy: ride the model curve for generation (swappable, commodity), **own the 
   - [ ] 🟥 **3.5g Evidence-cited blocking findings (no vague blocks).** Extend the verifier JSON contract: `blocking_defects` becomes an array of `{ ac_id, location, evidence, introduced_by_task: boolean, confidence: "high"|"medium"|"low", summary }` where `location` is file:line or diff-hunk reference and `evidence` names the command/test/runtime output or diff content supporting the claim. Update `parseReviewJson` + normalizers (accept legacy string[] during transition, mapping to `{ summary }`-only entries flagged `uncited: true`); update both verifier prompts: `A blocking defect without a location and evidence citation will be treated as a regression_risk, not a blocker.` Enforce exactly that in `deriveTaskVerdict` input assembly: uncited defects demote to regression_risks. Store the structured findings in `verification_records` (new jsonb column — migration 010, `blocking_findings jsonb not null default '[]'`). This makes false positives auditable and feeds Step 7's labeling.
   - [ ] 🟥 **3.5e Mechanical ladder ordering (fail fast, cheap first).** Make the verification order explicit and documented in `system-knowledge/concepts/evidence-and-verification.md`: (1) mechanical checks — scope-diff partition, harness-file pollution scan (`.taskgraph*`, `tasks/*/evidence/` in diff → instant defect, no LLM needed; add this as a pure function + node before `runModelReview`), (2) independent re-execution (3.5a), (3) LLM/agentic judgment (3.5b/c), (4) runtime checks (Step 6). Each rung that fails skips the more expensive rungs above it and routes immediately.
 
-- [ ] 🟥 **Step 4: Inner iteration loop in engineering (make the cheap loop exist)**
+- [ ] 🟥 **Step 4: Inner iteration loop in engineering — EVAL-GATED, default off**
+  > Gate: Claude Code already runs a native test-and-fix loop inside its session when told the test commands. Build this outer re-invocation loop ONLY if baseline evals (Step 3) show a material share of rework cycles caused by post-exit test failures (i.e. the worker exits green-believing but `runTests` fails). Our live history so far (T-011/T-012) shows rework driven by verifier findings, not test failures — so measure first. Ship with `TASKGRAPH_INNER_LOOP_ATTEMPTS=0` regardless; enable per eval evidence.
   - [ ] 🟥 `src/cells/engineering/workflow.ts`: add state channels `innerAttempts: number` (default 0) and keep `testResults`. After `runTests` fails, instead of routing straight to `handleError`, route to a NEW node `fixFromTestFailures` when `innerAttempts < TASKGRAPH_INNER_LOOP_ATTEMPTS` (env, default 2):
     - Node builds a focused prompt: the same authorization header + `The previous implementation attempt has failing tests. Fix ONLY what the failures indicate; do not expand scope.` + last `ciOutput` (tail-truncated 8k) + the implementation plan, writes it to the plan file, re-invokes Claude Code in the SAME worktree (reuse `invokeClaudeCode`'s shell path — extract its core into a helper both nodes call), increments `innerAttempts`, then edges back to `runTests`.
     - Graph edges: `runTests` conditional → `fixFromTestFailures` (on test-failure error + attempts remaining) | `handleError` (attempts exhausted or non-test error) | `commitChanges` (success). Preserve existing behavior when the loop is disabled (`TASKGRAPH_INNER_LOOP_ATTEMPTS=0`).
   - [ ] 🟥 Record an artifact per inner attempt (`inner_fix_attempt`, with attempt number + failure tail) so eval metrics can count them.
   - [ ] 🟥 `.env.example`: document `TASKGRAPH_INNER_LOOP_ATTEMPTS` and the tradeoff (each attempt costs a Claude Code invocation but is ~10× cheaper than a full rework cycle with re-verification).
   - [ ] 🟥 Re-run evals; expect rework counts to drop on the happy-path + scope cards. Record delta.
+
+- [ ] 🟥 **Step 4.5: Risk-routed planning and adversarial contract formation — EVAL-GATED**
+  > Principle: model collaboration is valuable when roles are asymmetric. Typical product work should receive an independent challenge before implementation. Only genuinely mechanical work bypasses that challenge.
+
+  ### Planning lanes
+
+  - [ ] 🟥 **Fast lane, exception only:** documentation, copy, isolated test changes, or explicitly located low-risk fixes.
+    - Flow: one contract draft → deterministic executability validation → execution.
+    - Fast lane is permitted only when repo policy allows it.
+    - A model may escalate out of fast lane, never downgrade into it.
+
+  - [ ] 🟥 **Standard lane, default for normal product and engineering work:**
+    - Flow: **Proposer → adversarial critic → adjudicator → final contract**.
+    - This replaces generic Plan A / Plan B / cross-review for ordinary work.
+
+  - [ ] 🟥 **Deliberative lane:** high-risk policy tier, multiple viable architecture options, cross-service changes, migrations, concurrency, security, or unresolved product decisions.
+    - Flow: two independent proposals → adversarial review of each proposal and their assumptions → adjudicator → human approval where decisions remain unresolved.
+
+  ### Role definitions
+
+  - [ ] 🟥 **Contract proposer**
+    - Produces a draft contract: goal, scope in/out, acceptance criteria, required evidence, verification commands, rollback requirements, assumptions, and open decisions.
+    - Does not decide unresolved product or compliance posture.
+
+  - [ ] 🟥 **Adversarial critic**
+    - Does not write an alternative implementation plan.
+    - Attacks the draft for missing acceptance criteria, scope leaks, contradictory requirements, policy conflicts, unsafe assumptions, migration/deployment hazards, missing rollback, and simpler safer alternatives.
+    - Returns structured findings: `{ concern_id, severity, evidence, required_change, requires_human_decision }`.
+
+  - [ ] 🟥 **Contract adjudicator**
+    - Produces the only contract engineering may execute.
+    - Resolves every critic finding with `{ accepted | rejected | unresolved, rationale, contract_change }`.
+    - Any unresolved high-risk or product decision routes to `HUMAN_DECISION_REQUIRED`, never to implementation.
+
+  ### Artifacts and inputs
+
+  - [ ] 🟥 Persist:
+    - `contract_draft`
+    - `adversarial_review`
+    - `contract_adjudication`
+    - `adjudicated_contract`
+  - [ ] 🟥 Engineering receives only `adjudicated_contract`.
+  - [ ] 🟥 Verification receives the final contract plus the adjudication log, so it can test the risks that were explicitly raised and accepted.
+
+  ### Model routing
+
+  - [ ] 🟥 Add roles:
+    - `MODEL_CONTRACT_PROPOSER`
+    - `MODEL_CONTRACT_CRITIC`
+    - `MODEL_CONTRACT_ADJUDICATOR`
+  - [ ] 🟥 Keep current environment variables as backwards-compatible aliases during migration.
+  - [ ] 🟥 The critic should use a different model family from the proposer where practical, because diversity of failure modes matters more than three identical calls.
+
+  ### Routing rule
+
+  - [ ] 🟥 Determine effective planning mode as:
+
+    ```text
+    max(repo policy minimum mode, deterministic change triggers, model escalation)
+    ```
+
+  - [ ] 🟥 The model may escalate from fast → standard → deliberative. It may never reduce the policy-required mode.
+
+  ### Eval additions
+
+  - [ ] 🟥 Add `expect.planning_mode` and `expect.human_decision_required` to evaluation cards.
+  - [ ] 🟥 Seed planning-specific cards:
+    - a normal feature where the critic must catch omitted scope or verification criteria
+    - conflicting requirements that must be resolved in adjudication rather than engineering rework
+    - a high-risk task missing an explicit privacy, permissions, or rollback decision that must block for human input
+  - [ ] 🟥 Measure downstream completion rate, rework rate, false blocks, wall-clock cost, and cost per successful task separately for fast, standard, and deliberative lanes.
+
+  ### Cross-references
+
+  - Step 2 risk tier and policy floor determine the minimum planning lane.
+  - Step 3 measures whether each lane earns its cost.
+  - Step 3.5 verifier consumes the adjudication log.
+  - Step 7 injects promoted lessons into the critic and adjudicator, not only the contract draft.
 
 - [ ] 🟥 **Step 5: Two workers + safe merge queue**
   - [ ] 🟥 5a — Integration push-retry + **candidate verification** (the merge queue): in `integrateCompletedTaskBranch`, wrap the final `git push` in a retry loop (×3): on non-fast-forward rejection, `git fetch`, re-create the integration worktree from the NEW `origin/<default>`, re-merge. **What gets verified is the candidate merge commit, not the task branch head** — the thing that lands must be the thing that was checked:
@@ -126,10 +206,17 @@ Strategy: ride the model curve for generation (swappable, commodity), **own the 
   - [ ] 🟥 Playwright stub: define the interface (`BrowserCheck` type + a `runBrowserChecks` that throws "not implemented") so the schema slot exists; do NOT add the dependency.
   - [ ] 🟥 Eval: add a card whose fixture is a tiny HTTP server task with `runtime_checks`; assert the pipeline catches a deliberately-broken endpoint (regression card) and passes a working one.
 
+- [ ] 🟥 **Step 6.5: Deployment verification (policy-conditional — the clearest long-term edge over IDE harnesses)**
+  > Scope guard: TaskGraph's current repos have no deployment infrastructure, and auto-deploy is out of v1 scope. But merge-on-COMPLETE (v2 Step 1) means any repo with deploy-on-push (e.g. Vercel/Railway watching the default branch) gets deployed by our integration WITHOUT any post-deploy check — integration could break production silently. This step closes that, activated per repo by policy, never speculatively.
+  - [ ] 🟥 Extend the 3.5f policy schema with an optional `deployment:` section — `{ provider: "vercel" | "railway" | "custom", health_url, deploy_timeout_ms, key_flow?: [{ method, path, expect_status, expect_body_contains }], migration_check?: "supabase", heartbeat_check?: { description, max_age_ms } }`.
+  - [ ] 🟥 New module `src/core/deploy-verification.ts`: after a successful integration push on a repo whose policy declares `deployment`, poll until the deployed environment reflects `candidate_sha` (provider APIs expose deployment→sha mapping via `VERCEL_TOKEN`/`RAILWAY_TOKEN` env; `custom` = poll `health_url` for a `X-Commit-Sha`/body sha marker), then assert `health_url` + `key_flow` probes against the DEPLOYED environment, confirm migration state when `migration_check` is set, and check worker/cron heartbeat freshness when declared.
+  - [ ] 🟥 Evidence + rollback: record a `deployment_verification` evidence record `{ candidate_sha, deployment_id, probes, rollback_target }` where `rollback_target` = the previously verified deployment id/sha. Failure → `integration_conflict`-style Telegram notification naming the rollback target + a `verdict_label`-compatible `missed_defect` candidate (the gate passed something production rejects — prime 7b material). v3 does NOT auto-rollback; it hands the human a loaded, specific runbook line.
+  - [ ] 🟥 Eval: one full-cycle card with a fixture "deployment" simulated by a local static server serving the sha marker — assert the verifier refuses to green-light when the deployed sha never converges.
+
 - [ ] 🟥 **Step 7: Lessons writeback (failures compound into knowledge)**
   - [ ] 🟥 New module `src/core/lessons.ts`: `recordLesson(repoFullName, taskId, trigger: "rework_escalated" | "contract_revised" | "integration_conflict", context: string)` — invoke cheap role `lessons` (env `MODEL_LESSONS`, cheap default) with: the trigger context (defects/failure summary/revision diff) + existing lessons file, prompt: `Distill ONE generalizable lesson (max 2 sentences) that would have prevented this. Merge into the list; dedupe aggressively; keep the newest 20.` Write to `system-knowledge/repos/${owner}__${name}-lessons.md`.
   - [ ] 🟥 Call sites: verification cell — rework-cap escalation branch and contract-revision branch; branch-integration conflict path.
-  - [ ] 🟥 Inject lessons (when present) into: contract-draft prompt (`LESSONS FROM PAST FAILURES IN THIS REPO:`) and the verifier system prompt.
+  - [ ] 🟥 **Quarantine before injection — model-written lessons are hypotheses, not rules.** Lessons land in the file with status `candidate`. A lesson is promoted to `active` only when (a) a human labels it via `/flag`-style confirmation, or (b) the same failure pattern recurs (≥2 occurrences matched by the lessons model). ONLY `active` lessons are injected into the contract-draft prompt (`LESSONS FROM PAST FAILURES IN THIS REPO:`) and the verifier system prompt; `candidate` lessons are visible to humans in the file but never steer prompts. Prevents one bad model-written generalization from silently biasing every future contract.
   - [ ] 🟥 Tests: prompt-builder pure-function tests; file path derivation shared with repo-card (extract common helper).
   - [ ] 🟥 **7b Delayed ground truth — label the verdicts reality disagrees with.** The gate's only true labels are the defects that escape it and the blocks humans overturn; capture both:
     - **Reversion watcher**: extend the watchdog with a cheap per-cycle check — for repos with integrations in the last 14 days, `git log origin/<default> --grep="Revert"` (and merge-commit parent checks) against recorded `candidate_sha`s; a reverted integration writes a `verdict_label` artifact `{ verification_record_id, label: "missed_defect", source: "reversion" }` + Telegram notification.
