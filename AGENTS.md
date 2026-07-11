@@ -24,10 +24,26 @@ precedence over the `.env` placeholders.
 ### Running the actual services requires real external services (not available by default)
 The pipeline (`npm run scheduler`, `npm run intake`, `npm run watchdog`) is only functional
 with real credentials for: a hosted Supabase project (with `supabase/migrations/` applied) via
-`SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` / `DATABASE_URL`, an `OPENROUTER_API_KEY`, the
-Claude Code CLI installed + authenticated (`CLAUDE_CODE_COMMAND`), and a Telegram bot
-(`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`). Add these via the Secrets panel to run end to end.
-`npm run healthcheck` reports exactly which of these are missing.
+`SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` / `DATABASE_URL`, an `OPENROUTER_API_KEY`, a coding
+CLI for the engineering cell (see below), and a Telegram bot (`TELEGRAM_BOT_TOKEN` /
+`TELEGRAM_CHAT_ID`). Add these via the Secrets panel to run end to end. `npm run healthcheck`
+reports exactly which of these are missing.
+
+### Engineering-cell coding CLI: Claude Code is out of scope; use the Cursor CLI
+The Claude Code CLI is out of scope for this project. The intended implementer is the Cursor
+CLI (`cursor-agent`), whose headless form is `cursor-agent -p --force [--model X]`
+(auth via `CURSOR_API_KEY` or `cursor-agent login`; add `--trust` to skip workspace-trust
+prompts). Swapping it in is NOT a pure config change today:
+- The default invocation in `src/cells/engineering/claude-code-config.ts` hardcodes the
+  Claude-specific flags `--print --dangerously-skip-permissions`, which `cursor-agent` does not
+  accept, so setting only `CLAUDE_CODE_COMMAND=cursor-agent` would fail on that flag.
+- `CLAUDE_CODE_ARGS` (JSON array) fully overrides the flags, but that branch (`workflow.ts`
+  ~L434) runs via `runCommand` with no stdin pipe, so the generated implementation-plan file is
+  not handed to the agent.
+A clean integration therefore needs a small code change to make the worker command's flags and
+stdin-pipe behaviour agnostic (or to pass the plan file path into `CLAUDE_CODE_ARGS`). The
+engineering cell only runs inside the full pipeline, so this can't be exercised without the
+Supabase + OpenRouter credentials above.
 
 ### Gotchas
 - `npm run intake` binds the Express server on port 3000 first, then calls `bot.start()`, which
