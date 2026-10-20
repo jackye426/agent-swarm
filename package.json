@@ -34,7 +34,8 @@
     "intake": "tsx src/intake/index.ts",
     "scheduler": "tsx src/scheduler/index.ts",
     "scheduler:once": "tsx src/scheduler/index.ts --once",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:queue-acl": "node --test tests/database/queue-acl.test.mjs"
   },
   "dependencies": {
     "@langchain/langgraph": "^0.2.71",
@@ -47,6 +48,7 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.3.14",
     "@types/express": "^5.0.6",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.10.2",

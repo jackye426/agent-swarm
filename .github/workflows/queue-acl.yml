@@ -1,0 +1,15 @@
+name: Queue RPC permissions
+on:
+  push:
+  pull_request:
+jobs:
+  queue-acl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run test:queue-acl
