@@ -1,3 +1,5 @@
+begin;
+
 -- Expose Supabase Queues / pgmq operations through public RPC functions.
 -- PostgREST only exposes configured schemas; these wrappers let the backend
 -- call queues through Supabase JS without exposing the pgmq schema directly.
@@ -63,3 +65,21 @@ as $$
     m.scrape_time
   from pgmq.metrics(queue_name) as m;
 $$;
+
+-- Backend-only RPCs: src/db/client.ts requires SUPABASE_SERVICE_ROLE_KEY.
+-- PUBLIC must be revoked too: named-role revokes do not override inherited access.
+revoke execute on function
+  public.pgmq_send(text, jsonb),
+  public.pgmq_read(text, integer, integer),
+  public.pgmq_delete(text, bigint),
+  public.pgmq_metrics(text)
+from PUBLIC, anon, authenticated;
+
+grant execute on function
+  public.pgmq_send(text, jsonb),
+  public.pgmq_read(text, integer, integer),
+  public.pgmq_delete(text, bigint),
+  public.pgmq_metrics(text)
+to service_role;
+
+commit;
